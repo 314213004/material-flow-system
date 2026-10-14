@@ -231,3 +231,23 @@ def test_admin_batch_rbac_supervisor_exception_only():
         assert page.status_code == 200 and "mb-bar" not in page.text
     with TestClient(backend.app) as anon:
         assert anon.post("/admin/orders/BT-1/materials/batch", data={"action": "OUTBOUND"}).status_code == 401
+
+
+def test_admin_batch_retry_same_batch_id_is_idempotent_and_zero_qty_rejected():
+    seed()
+    with TestClient(backend.app) as client:
+        assert web_login(client, "owlco", "Admin@2026").status_code == 303
+        csrf = form_csrf(client.get("/admin/orders?order_no=BT-1").text)
+        bid = "0b8f2c1e-6d1a-4c7e-9a55-1f2d3c4b5a69"
+        r1 = _batch(client, csrf, "OUTBOUND", ["req-b1"], batchId=bid)
+        r2 = _batch(client, csrf, "OUTBOUND", ["req-b1"], batchId=bid)
+        assert r1.status_code == r2.status_code == 200
+        assert r1.json()["succeeded"][0]["id"] == r2.json()["succeeded"][0]["id"]
+        c = backend.db()
+        n = c.execute("SELECT COUNT(*) FROM transfer_requests WHERE document_no='BT-1' AND type='OUTBOUND'").fetchone()[0]
+        c.close()
+        assert n == 1
+        # 显式填 0 不再被悄悄换成需求数
+        z = _batch(client, csrf, "OUTBOUND", ["req-b2"], **{"qty_req-b2": "0"})
+        body = z.json()
+        assert not body["succeeded"] and "正整数" in body["failed"][0]["error"]

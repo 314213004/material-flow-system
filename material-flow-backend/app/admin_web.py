@@ -1858,7 +1858,25 @@ async def admin_order_material_batch(request: Request, order_no: str):
         quantities = {rid: _form_int(form, f"qty_{rid}") for rid in req_ids}
     except ValueError:
         return _batch_json(False, 400, error="数量必须是非负整数")
+    # 批次号：前端每次打开对话框生成一次，重试沿用。每条的幂等键由批次号 + 动作 + 需求 ID 派生，
+    # 同一批次重复提交时既有 API 按幂等键回放，不会重复建单。旧客户端未传时退化为每次新建。
+    try:
+        batch_id = uuid.UUID(str(form.get("batchId", "") or "").strip())
+    except ValueError:
+        batch_id = uuid.uuid4()
 
+    # 下面是逐条的同步 SQLite 写入（最多 MATERIAL_BATCH_MAX_ITEMS 条），放到线程池里执行，
+    # 不阻塞事件循环（见 0.8.2 事故：async 路由里不得直接做阻塞 IO）。
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(
+        _run_material_batch, request, user, order_no, action, req_ids, quantities, remark,
+        target_location, source_location, exception_type, batch_id,
+    )
+
+
+def _run_material_batch(request: Request, user: Any, order_no: str, action: str, req_ids: list[str],
+                        quantities: dict[str, int | None], remark: str, target_location: str | None,
+                        source_location: str | None, exception_type: str, batch_id: uuid.UUID):
     c = db()
     try:
         order = c.execute("SELECT id FROM production_orders WHERE order_no=?", (order_no,)).fetchone()
@@ -1881,7 +1899,8 @@ async def admin_order_material_batch(request: Request, order_no: str):
         }
         sources = {
             rid: (source_location or _pick_source_location(
-                c, rows[rid]["material_id"], quantities.get(rid) or rows[rid]["required_quantity"]))
+                c, rows[rid]["material_id"],
+                quantities[rid] if quantities.get(rid) is not None else rows[rid]["required_quantity"]))
             for rid in req_ids if rid in rows and action == "TRANSFER"
         }
     finally:
@@ -1900,13 +1919,15 @@ async def admin_order_material_batch(request: Request, order_no: str):
             qty = quantities.get(rid)
             qty = book if qty is None else qty
         else:
-            qty = quantities.get(rid) or int(row["required_quantity"] or 0)
+            qty = quantities.get(rid)
+            if qty is None:  # 未填才取需求数；显式填 0 视为无效，不悄悄替换
+                qty = int(row["required_quantity"] or 0)
             if qty < 1:
                 failed.append({"requirementId": rid, "materialCode": code, "error": "数量必须为正整数"})
                 continue
         device_no = row["device_no"] or ""
         full_remark = (f"机台：{device_no}；" if device_no else "") + remark
-        op_id = str(uuid.uuid4())
+        op_id = str(uuid.uuid5(batch_id, f"{action}:{rid}"))
         try:
             if action == "EXCEPTION":
                 result = api_create_exception(

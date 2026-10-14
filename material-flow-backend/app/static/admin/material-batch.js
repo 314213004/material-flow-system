@@ -133,8 +133,19 @@
     ok.style.display = '';
     ok.disabled = store.size > MAX_ITEMS;
     ok.textContent = '提交' + label;
+    // 每次打开对话框生成一个批次号；超时/失败后重试沿用同一批次号，服务端据此幂等，不会重复建单
+    form.setAttribute('data-batch-id', newBatchId());
     form.querySelector('.mb-cancel').textContent = '取消';
     mask.classList.add('show');
+  }
+
+  function newBatchId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') return window.crypto.randomUUID();
+    var b = new Uint8Array(16);
+    (window.crypto || window.msCrypto).getRandomValues(b);
+    b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+    var h = Array.prototype.map.call(b, function (x) { return ('0' + x.toString(16)).slice(-2); }).join('');
+    return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
   }
 
   function closeDialog(root) {
@@ -163,6 +174,7 @@
     if (bad) { showError(form, action === 'EXCEPTION' ? '实际数量必须是非负整数' : '数量必须是正整数'); return; }
     fd.append('csrf_token', root.getAttribute('data-csrf') || '');
     fd.append('action', action);
+    fd.append('batchId', form.getAttribute('data-batch-id') || newBatchId());
     store.forEach(function (item) { fd.append('requirementId', item.id); });
     var ok = form.querySelector('.mb-ok');
     ok.disabled = true;
