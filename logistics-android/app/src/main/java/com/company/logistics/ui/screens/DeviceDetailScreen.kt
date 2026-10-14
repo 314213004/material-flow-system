@@ -1,6 +1,5 @@
 package com.company.logistics.ui.screens
 
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -21,7 +20,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
-import androidx.compose.foundation.border
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -31,7 +29,6 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -44,7 +41,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -61,11 +57,15 @@ import com.company.logistics.model.LaborSummaryPage
 import com.company.logistics.model.OrderMaterialItem
 import com.company.logistics.model.TransferRequest
 import com.company.logistics.model.UserRole
+import com.company.logistics.model.MaterialBatchAction
 import com.company.logistics.ui.components.AppCard
+import com.company.logistics.ui.components.MaterialBatchActionBar
+import com.company.logistics.ui.components.MaterialBatchCheckBox
+import com.company.logistics.ui.components.MaterialBatchDialog
+import com.company.logistics.ui.components.MaterialBatchSubmission
 import com.company.logistics.ui.components.EmptyState
 import com.company.logistics.ui.components.StatusTag
 import com.company.logistics.ui.components.VSpace
-import com.company.logistics.ui.components.LogisticsIcons
 import com.company.logistics.ui.components.tagTextColor
 import com.company.logistics.ui.theme.Dimens
 import com.company.logistics.ui.theme.LogisticsColors
@@ -90,17 +90,20 @@ fun DeviceDetailScreen(
     labor: LaborSummaryPage?,
     onBack: () -> Unit,
     onSubmitMaterialRequest: (material: OrderMaterialItem, orderNo: String, quantity: Int, remark: String) -> Unit = { _, _, _, _ -> },
-    onSubmitMaterialRequestBatch: (items: List<OrderMaterialItem>, orderNo: String, remark: String) -> Unit = { _, _, _ -> },
+    onSubmitMaterialBatch: (MaterialBatchSubmission) -> Unit = {},
     onSubmitException: (deviceId: String, materialId: String, materialCode: String, orderNo: String, type: String, bookQuantity: Int, actualQuantity: Int, description: String) -> Unit = { _, _, _, _, _, _, _, _ -> },
     role: UserRole = UserRole.OPERATOR,
+    readOnly: Boolean = false,
+    batchSubmitting: Boolean = false,
     drawings: @Composable (deviceId: String) -> Unit = {},
 ) {
     val context = LocalContext.current
     var showMaterialRequestDialog by remember { mutableStateOf(false) }
     var exceptionMaterial by remember { mutableStateOf<OrderMaterialItem?>(null) }
-    // 勾选物料批量流转申请（materialId 集合）；detail 重新加载时保留已勾选项
+    // 勾选物料批量操作（materialId 集合）；detail 重新加载时保留已勾选项
     var checkedMaterialIds by remember { mutableStateOf(setOf<String>()) }
-    var showBatchTransferDialog by remember { mutableStateOf(false) }
+    var batchAction by remember { mutableStateOf<MaterialBatchAction?>(null) }
+    val batchActions = remember(role) { MaterialBatchAction.availableFor(role) }
     Column(
         Modifier
             .fillMaxSize()
@@ -295,38 +298,24 @@ fun DeviceDetailScreen(
                             }
                         }
                         VSpace(Spacing.sm)
-                        // 批量操作栏前置：无需滑到列表底部即可全选 / 提交
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            val allChecked = filtered.isNotEmpty() &&
-                                checkedMaterialIds.containsAll(filtered.map { it.materialId })
-                            TextButton(
-                                onClick = {
-                                    checkedMaterialIds =
-                                        if (allChecked) emptySet()
-                                        else filtered.map { it.materialId }.toSet()
-                                },
-                                enabled = filtered.isNotEmpty(),
-                            ) {
-                                Text(if (allChecked) "取消全选" else "全选", fontSize = 12.sp)
-                            }
-                            Text(
-                                "已选 ${checkedMaterialIds.size} 项",
-                                modifier = Modifier.weight(1f),
-                                fontSize = 12.sp,
-                                color = LogisticsTheme.colors.textSecondary,
-                            )
-                            TextButton(
-                                onClick = { showBatchTransferDialog = true },
-                                enabled = checkedMaterialIds.isNotEmpty(),
-                            ) {
-                                Text(
-                                    "提交流转申请",
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = LogisticsColors.PrimaryDark,
-                                )
-                            }
-                        }
+                        // 批量操作栏前置：无需滑到列表底部即可全选 / 发起出库申请、退料、厂内调拨、异常提报
+                        val allChecked = filtered.isNotEmpty() &&
+                            checkedMaterialIds.containsAll(filtered.map { it.materialId })
+                        MaterialBatchActionBar(
+                            visibleCount = filtered.size,
+                            selectedCount = checkedMaterialIds.size,
+                            allChecked = allChecked,
+                            actions = batchActions,
+                            readOnly = readOnly,
+                            submitting = batchSubmitting,
+                            onToggleAll = {
+                                checkedMaterialIds =
+                                    if (allChecked) checkedMaterialIds - filtered.map { it.materialId }.toSet()
+                                    else checkedMaterialIds + filtered.map { it.materialId }
+                            },
+                            onClear = { checkedMaterialIds = emptySet() },
+                            onAction = { batchAction = it },
+                        )
                         if (filtered.isEmpty()) {
                             Text(
                                 "没有匹配的物料",
@@ -336,7 +325,7 @@ fun DeviceDetailScreen(
                             )
                         } else {
                             // 表格模式：表头固定不随内容横滑，列宽两侧一致；操作/勾选列按角色裁剪
-                            val canOperate = role != UserRole.ASSEMBLER
+                            val canOperate = role != UserRole.ASSEMBLER && batchActions.isNotEmpty()
                             MaterialTableHeader(canOperate = canOperate)
                             Text(
                                 "← 左右滑动查看在库状态与操作 →",
@@ -734,17 +723,19 @@ fun DeviceDetailScreen(
         )
     }
 
-    // ---- 批量流转申请对话框：勾选多条物料一次提交（每项按需求数量出库） ----
-    if (showBatchTransferDialog && detail != null && checkedMaterialIds.isNotEmpty()) {
+    // ---- 批量操作对话框（与订单页共用）：出库申请 / 退料 / 厂内调拨 / 异常提报 ----
+    val currentBatchAction = batchAction
+    if (currentBatchAction != null && detail != null && checkedMaterialIds.isNotEmpty()) {
         val batchItems = materials.filter { it.materialId in checkedMaterialIds }
-        DeviceBatchTransferDialog(
-            count = batchItems.size,
-            orders = detail.orders,
-            submitting = loading,
-            onDismiss = { showBatchTransferDialog = false },
-            onConfirm = { orderNo, remark ->
-                showBatchTransferDialog = false
-                onSubmitMaterialRequestBatch(batchItems, orderNo, remark)
+        MaterialBatchDialog(
+            action = currentBatchAction,
+            items = batchItems,
+            orders = detail.orders.map { o -> o.orderNo to (o.orderNo + (o.productName?.let { " · $it" } ?: "")) },
+            submitting = batchSubmitting,
+            onDismiss = { batchAction = null },
+            onConfirm = { submission ->
+                batchAction = null
+                onSubmitMaterialBatch(submission)
                 checkedMaterialIds = emptySet()
             },
         )
@@ -1090,11 +1081,11 @@ private fun MaterialTableRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onToggle)
+            .clickable(enabled = canOperate, onClick = onToggle)
             .padding(vertical = 4.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        if (canOperate) MaterialCheckIndicator(checked)
+        if (canOperate) MaterialBatchCheckBox(checked)
         Text(
             item.materialCode,
             fontSize = 11.sp,
@@ -1154,35 +1145,6 @@ private fun MaterialTableRow(
     }
 }
 
-/** 紧凑勾选指示器：16dp 圆角方块，选中实心打勾；整行 clickable 负责点击，此处仅展示。 */
-@Composable
-private fun MaterialCheckIndicator(checked: Boolean) {
-    val shape = RoundedCornerShape(3.dp)
-    Box(
-        modifier = Modifier
-            .padding(end = 8.dp)
-            .size(16.dp)
-            .clip(shape)
-            .then(
-                if (checked) {
-                    Modifier.background(MaterialTheme.colorScheme.primary, shape)
-                } else {
-                    Modifier.border(1.5.dp, LogisticsTheme.colors.border, shape)
-                }
-            ),
-        contentAlignment = Alignment.Center,
-    ) {
-        if (checked) {
-            Image(
-                imageVector = LogisticsIcons.Check,
-                contentDescription = null,
-                colorFilter = ColorFilter.tint(Color.White),
-                modifier = Modifier.size(11.dp),
-            )
-        }
-    }
-}
-
 @Composable
 private fun MaterialNumCell(value: Int, modifier: Modifier = Modifier) {
     Text(
@@ -1218,71 +1180,3 @@ private fun MaterialTypeChip(text: String, selected: Boolean, onClick: () -> Uni
     }
 }
 
-/**
- * 批量流转申请对话框：勾选多条物料后一次提交。
- * 每项按需求数量创建出库（OUTBOUND）流转申请，逐条独立提交，部分失败不影响已成功条目。
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun DeviceBatchTransferDialog(
-    count: Int,
-    orders: List<com.company.logistics.model.DeviceOrder>,
-    submitting: Boolean,
-    onDismiss: () -> Unit,
-    onConfirm: (orderNo: String, remark: String) -> Unit,
-) {
-    var selectedOrder by remember(orders) { mutableStateOf(orders.singleOrNull()?.orderNo ?: "") }
-    var orderExpanded by remember { mutableStateOf(false) }
-    var remark by remember { mutableStateOf("") }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        properties = DialogProperties(decorFitsSystemWindows = false),
-        // 键盘弹出时对话框整体上移，提交申请按钮始终可见
-        modifier = Modifier.imePadding(),
-        title = { Text("批量流转申请", fontSize = 16.sp, fontWeight = FontWeight.Bold) },
-        text = {
-            Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState())) {
-                Text(
-                    "已勾选 $count 项物料，将按各项需求数量分别创建出库流转申请。",
-                    fontSize = 13.sp,
-                    color = LogisticsTheme.colors.textSecondary,
-                )
-                Spacer(Modifier.height(12.dp))
-                ExposedDropdownMenuBox(expanded = orderExpanded, onExpandedChange = { orderExpanded = it }) {
-                    OutlinedTextField(
-                        value = selectedOrder,
-                        onValueChange = {},
-                        readOnly = true,
-                        label = { Text("关联订单") },
-                        trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(orderExpanded) },
-                        modifier = Modifier.menuAnchor().fillMaxWidth(),
-                    )
-                    ExposedDropdownMenu(expanded = orderExpanded, onDismissRequest = { orderExpanded = false }) {
-                        orders.forEach { o ->
-                            DropdownMenuItem(
-                                text = { Text(o.orderNo + (o.productName?.let { " · $it" } ?: ""), fontSize = 13.sp) },
-                                onClick = { selectedOrder = o.orderNo; orderExpanded = false },
-                            )
-                        }
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = remark,
-                    onValueChange = { remark = it },
-                    label = { Text("备注（可选）") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(
-                onClick = { onConfirm(selectedOrder, remark) },
-                enabled = selectedOrder.isNotBlank() && count > 0 && !submitting,
-            ) { Text("提交申请") }
-        },
-        dismissButton = { TextButton(onClick = onDismiss, enabled = !submitting) { Text("取消") } },
-    )
-}
