@@ -1,7 +1,36 @@
 # NEXT.md — 交接看板
 
 > 给下一个对话用。**不要复述上下文，读这个文件即可。**
-> 最后更新：2026-09-13 14:15
+> 最后更新：2026-10-14（下方第 0–6 节为 2026-09 的历史记录，部分分支/HEAD/测试数已过时，以本节为准）
+
+---
+
+## ★ 最新状态（2026-10-14）
+
+| 项 | 值 |
+|----|-----|
+| 主仓库 | GitHub `owlco001/material-flow-system`（用户 fork：`314213004/material-flow-system`），主干 `main` |
+| 基线 | `main` @ `57afd9f`：后端 **0.13.0**（清除演示/测试数据，#40），App **0.5.38**（versionCode 45） |
+| 本轮 | 分支 `feature/batch-material-ops`：后端 **0.14.0**、App **0.5.39**（versionCode 46） |
+| 后端测试 | `cd material-flow-backend && python3 -m pytest tests/ -q -p no:cacheprovider` → 437 passed（基线 431 + 新增 6），约 3.5 分钟 |
+
+**本轮功能：订单页 / 机台页物料勾选批量操作**（出库申请 / 退料 / 厂内调拨 / 异常提报）
+- 后端：流转类型新增 `RETURN`（退料，按入库审批规则）；`TRANSFER`（厂内调拨）创建时强制来源+目标库位、限定角色，
+  执行改为只在库位间移动、不再扣减物料汇总（原实现的 bug）；创建角色集中为 `TRANSFER_CREATE_ROLES` / `EXCEPTION_CREATE_ROLES`。
+  机台任务详情 `materials[]` 增加 `requirementId/materialId/deviceId`。契约见 `docs/物料流转系统-V1-API契约冻结补遗.md` §1.2 增补。
+- 管理台：`/admin/orders?order_no=` 物料需求与 `/admin/orders/{单号}/tasks/{任务}` 机台物料加勾选 + 全选本页（跨页保留）+ 四个批量按钮
+  （按角色裁剪），提交 `POST /admin/orders/{单号}/materials/batch`（会话 + CSRF），服务端逐条调用既有 API，逐条回显结果，
+  另记一条 `BATCH_<动作>` 审计（SUCCESS / PARTIAL / FAILURE）。脚本 `app/static/admin/material-batch.js`，模板宏 `_material_batch.html`。
+- App：共享组件 `ui/components/MaterialBatchComponents.kt`（勾选框 / 批量操作栏 / 批量对话框，可逐条改数量）；
+  订单页新增「物料需求明细」可勾选列表（机台下钻页同样可勾选），机台页批量栏从单一「提交流转申请」扩展为四个动作；
+  `LogisticsViewModel.submitMaterialBatch` 统一处理（预览只读拦截、角色裁剪、逐条部分失败、离线入队）；离线队列新增 `RETURN`，
+  `RELOCATION` 首次接入重放（documentNo / 来源库位打包在 remark JSON）。
+
+**待办 / 注意**
+- 本沙箱无 JDK / Android SDK，App 本轮**未编译、未跑单测**（新增 `LogisticsViewModelMaterialBatchTest`、改了 `VersionConfigTest`），合并前务必
+  `cd logistics-android && ./gradlew :app:compileDebugKotlin :app:testDebugUnitTest`。
+- `scripts/check_emoji_icons.py` 在 main 上即有 3 处历史 FAIL（MaterialDetailScreen / Model3dViewerScreen / OrderDetailScreen「✓ 物料齐套」），本轮未新增。
+- 已知遗留：OUTBOUND 离线重放仍不带 documentNo（历史行为，未改）。
 
 ---
 

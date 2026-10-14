@@ -20,6 +20,8 @@ import com.company.logistics.model.LaborRecord
 import com.company.logistics.model.LaborSummaryItem
 import com.company.logistics.model.LaborSummaryPage
 import com.company.logistics.model.MaterialInventory
+import com.company.logistics.model.MaterialBatchAction
+import com.company.logistics.model.MaterialBatchLine
 import com.company.logistics.model.MachineProgress
 import com.company.logistics.model.OfflineOperation
 import com.company.logistics.model.OrderMaterialItem
@@ -272,6 +274,8 @@ data class LogisticsUiState(
     val transferSubmitting: Boolean = false,
     val transferClientOperationId: String? = null,
     val exceptionSubmitting: Boolean = false,
+    /** 物料勾选批量操作提交中（订单页 / 机台页共用；不复用 loading，避免机台页整页切换为加载态） */
+    val batchSubmitting: Boolean = false,
     val managedUsers: List<com.company.logistics.model.ManagedUser> = emptyList(),
     val managedUsersLoading: Boolean = false,
     val managedUsersError: String? = null,
@@ -2797,52 +2801,141 @@ class LogisticsViewModel(
     }
 
     /**
-     * 机台详情页批量申请物料（勾选多条）：逐条查库存并创建 OUTBOUND 流转申请，
-     * 数量取各物料需求数量。逐条独立提交，部分失败不影响已成功条目；离线入队也算提交成功。
+     * 机台详情页批量申请物料（勾选多条）：保留原入口，按各物料需求数量走 [submitMaterialBatch] 的出库申请。
      */
     fun submitDeviceMaterialRequestBatch(items: List<com.company.logistics.model.OrderMaterialItem>, orderNo: String, remark: String) {
-        if (_state.value.preview) {
-            _state.update { it.copy(error = "测试预览只读，不能申请物料") }
+        submitMaterialBatch(
+            action = MaterialBatchAction.OUTBOUND,
+            lines = items.map { MaterialBatchLine(it, it.requiredQuantity) },
+            orderNo = orderNo,
+            remark = remark,
+            contextDeviceNo = _state.value.deviceDetail?.deviceNo,
+        )
+    }
+
+    /**
+     * 订单页 / 机台页物料勾选批量操作：出库申请 / 退料 / 厂内调拨 / 异常提报。
+     *
+     * - 逐条独立提交，部分失败不影响已成功条目，最后汇总「成功 / 离线入队 / 失败（逐条原因）」；
+     * - 走离线优先：网络不可用时入本地队列（退料、调拨、异常均可重放），入队计为已提交；
+     * - 测试预览只读、角色无权限时在到达仓库层前拦截（服务端仍逐条鉴权）；
+     * - 出库/退料/调拨先查库存拿 expectedInventoryVersion；调拨来源库位未指定时取库存足量的库位。
+     *
+     * @param contextDeviceNo 机台页传当前机台号写入备注；订单页为空时取各物料行自身的机台号。
+     * @param fallbackDeviceId 异常提报时物料行缺 deviceId 的兜底机台（机台页为 devices.id）。
+     */
+    fun submitMaterialBatch(
+        action: MaterialBatchAction,
+        lines: List<MaterialBatchLine>,
+        orderNo: String,
+        remark: String,
+        targetLocation: String? = null,
+        sourceLocation: String? = null,
+        exceptionType: String = "OTHER",
+        contextDeviceNo: String? = null,
+        fallbackDeviceId: String? = null,
+    ) {
+        val current = _state.value
+        if (current.preview) {
+            _state.update { it.copy(error = "测试预览只读，不能发起${action.label}") }
             return
         }
-        if (items.isEmpty() || orderNo.isBlank()) {
+        if (!action.allowedFor(current.role)) {
+            _state.update { it.copy(error = "当前角色不能发起${action.label}") }
+            return
+        }
+        if (lines.isEmpty() || orderNo.isBlank()) {
             _state.update { it.copy(error = "请勾选物料并选择关联订单") }
             return
         }
+        val target = targetLocation?.trim()?.takeIf { it.isNotBlank() }
+        val source = sourceLocation?.trim()?.takeIf { it.isNotBlank() }
+        val note = remark.trim()
+        when {
+            action == MaterialBatchAction.RELOCATION && target == null ->
+                return _state.update { it.copy(error = "厂内调拨必须填写目标库位") }
+            action == MaterialBatchAction.EXCEPTION && note.isBlank() ->
+                return _state.update { it.copy(error = "异常提报必须填写描述") }
+            action == MaterialBatchAction.EXCEPTION && lines.any { it.quantity < 0 } ->
+                return _state.update { it.copy(error = "实际数量必须是非负整数") }
+            action != MaterialBatchAction.EXCEPTION && lines.any { it.quantity <= 0 } ->
+                return _state.update { it.copy(error = "数量必须为正整数") }
+        }
+        if (current.batchSubmitting) return
         operationScope.launch {
-            _state.update { it.copy(loading = true, error = null, message = null) }
-            val deviceNo = _state.value.deviceDetail?.deviceNo.orEmpty()
-            val fullRemark = buildString {
-                if (deviceNo.isNotBlank()) append("机台：$deviceNo；")
-                if (remark.isNotBlank()) append(remark)
-            }.ifBlank { null }
+            _state.update { it.copy(batchSubmitting = true, error = null, message = null) }
             var ok = 0
+            var queued = 0
             val failures = mutableListOf<String>()
-            items.forEach { material ->
-                val inv = repo.materialInventory(material.materialCode).getOrNull()
-                if (inv == null) {
-                    failures += "${material.materialCode}：查无库存"
-                    return@forEach
+            lines.forEach { line ->
+                val m = line.item
+                val deviceNo = contextDeviceNo?.takeIf { it.isNotBlank() } ?: m.deviceNo.orEmpty()
+                val fullRemark = buildString {
+                    if (deviceNo.isNotBlank()) append("机台：$deviceNo；")
+                    if (note.isNotBlank()) append(note)
+                }.ifBlank { null }
+                val result: SubmitResult = if (action == MaterialBatchAction.EXCEPTION) {
+                    val deviceId = m.deviceId?.takeIf { it.isNotBlank() } ?: fallbackDeviceId?.takeIf { it.isNotBlank() }
+                    if (deviceId == null || m.materialId.isBlank()) {
+                        failures += "${m.materialCode}：缺少机台或物料，无法提报"
+                        return@forEach
+                    }
+                    repo.submitExceptionQueued(
+                        materialCode = m.materialCode,
+                        materialId = m.materialId,
+                        orderNo = orderNo,
+                        deviceId = deviceId,
+                        type = exceptionType,
+                        bookQuantity = m.inStockQuantity,
+                        actualQuantity = line.quantity,
+                        description = fullRemark.orEmpty(),
+                    )
+                } else {
+                    val inv = repo.materialInventory(m.materialCode).getOrNull()
+                    if (inv == null) {
+                        failures += "${m.materialCode}：查无库存"
+                        return@forEach
+                    }
+                    when (action) {
+                        MaterialBatchAction.OUTBOUND -> repo.submitOutbound(m, inv, orderNo, line.quantity, fullRemark)
+                        MaterialBatchAction.RETURN -> repo.submitReturn(m, inv, orderNo, line.quantity, target, fullRemark)
+                        else -> {
+                            val from = source ?: pickRelocationSource(inv, line.quantity)
+                            if (from == null) {
+                                failures += "${m.materialCode}：无可用来源库位"
+                                return@forEach
+                            }
+                            repo.submitRelocation(m, inv, orderNo, line.quantity, from, target.orEmpty(), fullRemark)
+                        }
+                    }
                 }
-                when (val r = repo.submitOutbound(material, inv, orderNo, material.requiredQuantity, fullRemark)) {
+                when (result) {
                     is SubmitResult.Success -> ok++
-                    is SubmitResult.Queued -> ok++
-                    is SubmitResult.Failure -> failures += "${material.materialCode}：${r.message}"
+                    is SubmitResult.Queued -> queued++
+                    is SubmitResult.Failure -> failures += "${m.materialCode}：${result.message}"
                 }
             }
+            val submitted = ok + queued
+            val summary = "已提交 $submitted 条${action.label}" +
+                if (queued > 0) "（其中 $queued 条网络不可用已入队，恢复后自动同步）" else ""
             _state.update {
                 when {
-                    failures.isEmpty() -> it.copy(loading = false, message = "已提交 $ok 条流转申请")
-                    ok == 0 -> it.copy(loading = false, error = "批量申请全部失败：" + failures.joinToString("；"))
+                    failures.isEmpty() -> it.copy(batchSubmitting = false, message = summary)
+                    submitted == 0 -> it.copy(batchSubmitting = false, error = "批量${action.label}全部失败：" + failures.joinToString("；"))
                     else -> it.copy(
-                        loading = false,
-                        message = "已提交 $ok 条流转申请",
+                        batchSubmitting = false,
+                        message = summary,
                         error = "失败 ${failures.size} 条：" + failures.joinToString("；"),
                     )
                 }
             }
         }
     }
+
+    /** 调拨来源库位：优先库存足量的库位，其次主库位（首个绑定库位）。 */
+    private fun pickRelocationSource(inv: MaterialInventory, quantity: Int): String? =
+        inv.inventory.locations.firstOrNull { it.quantity >= quantity }?.locationCode
+            ?: inv.primaryLocation
 
     /**
      * 机台详情页提交异常：机台、物料固定，订单从机台关联订单选择。

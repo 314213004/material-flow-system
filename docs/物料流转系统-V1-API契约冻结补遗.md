@@ -27,7 +27,15 @@ INBOUND       入库，需要审批
 OUTBOUND      出库，需要审批
 TRANSFER      调拨，提交后直接执行
 STOCKTAKE     盘点，提交后等待仓库管理员确认
+RETURN        退料（0.14.0 新增），按入库审批规则处理，需要审批
 ```
+
+> 0.14.0 增补（物料勾选批量操作）：
+> - `RETURN`：创建角色同入库/出库（OPERATOR / MATERIAL / ADMIN）；审批执行后增加库存，`targetLocationCode` 可选（有则增加该库位明细）。
+> - `TRANSFER`（厂内调拨）：每个 item 必须同时给出 `sourceLocationCode` 与 `targetLocationCode` 且不同，否则 `400 VALIDATION_ERROR`；
+>   创建角色为 OPERATOR / MATERIAL / WAREHOUSE_ADMIN / ADMIN；执行时来源库位扣减、目标库位增加，**物料汇总数量不变**
+>   （修正：此前执行会错误扣减 `materials.total/available_quantity`）。现实现与入库/出库一致，创建后进入 `PENDING_APPROVAL`。
+> - 批量操作 = 客户端/管理台按物料逐条调用本接口（每条独立幂等键），部分失败不影响已成功条目。
 
 ### 1.3 角色
 
