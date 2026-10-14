@@ -793,8 +793,13 @@ open class MaterialFlowApi(
         evidenceIds: List<String> = emptyList()
     ): TransferRequestResult = withContext(Dispatchers.IO) {
         requireUuid(clientOperationId, "clientOperationId")
-        require(type == "INBOUND" || type == "OUTBOUND") { "流转类型无效" }
+        require(type in CLIENT_TRANSFER_TYPES) { "流转类型无效" }
         require(items.isNotEmpty()) { "流转申请至少包含一个物料" }
+        if (type == "TRANSFER") {
+            require(items.all { !it.sourceLocationCode.isNullOrBlank() && !it.targetLocationCode.isNullOrBlank() }) {
+                "厂内调拨必须同时填写来源库位与目标库位"
+            }
+        }
         val itemArray = JSONArray()
         items.forEach { item ->
             require(item.materialId.isNotBlank()) { "物料不能为空" }
@@ -1158,6 +1163,9 @@ open class MaterialFlowApi(
 }
 
 /** 流转申请的物料条目 —— 契约 4.5 items */
+/** 客户端可发起的流转类型：入库 / 出库 / 退料 / 厂内调拨（盘点走独立接口）。 */
+internal val CLIENT_TRANSFER_TYPES = setOf("INBOUND", "OUTBOUND", "RETURN", "TRANSFER")
+
 data class TransferItem(
     val materialId: String,
     val quantity: Int,
