@@ -91,7 +91,19 @@ FORBIDDEN_SCAN_TYPES = ("ORDER_NO", "LOGISTICS_NO", "ORDER", "LOGISTICS")
 
 ACCEPTED_ORDER_DOC_TYPES = ("PRODUCTION_ORDER",)
 
-TRANSFER_TYPES = ("INBOUND", "OUTBOUND", "TRANSFER", "STOCKTAKE")
+TRANSFER_TYPES = ("INBOUND", "OUTBOUND", "TRANSFER", "STOCKTAKE", "RETURN")
+# 0.14.0：流转申请创建权限按类型集中声明（App 与管理台批量操作共用同一口径）。
+# RETURN（退料）按入库审批规则处理；TRANSFER（厂内调拨）由现场与仓库角色发起。
+# STOCKTAKE 未列出 = 保持历史行为（不限角色）。
+TRANSFER_CREATE_ROLES: dict[str, frozenset[str]] = {
+    "INBOUND": frozenset({"OPERATOR", "MATERIAL", "ADMIN"}),
+    "OUTBOUND": frozenset({"OPERATOR", "MATERIAL", "ADMIN"}),
+    "RETURN": frozenset({"OPERATOR", "MATERIAL", "ADMIN"}),
+    "TRANSFER": frozenset({"OPERATOR", "MATERIAL", "WAREHOUSE_ADMIN", "ADMIN"}),
+}
+EXCEPTION_CREATE_ROLES = frozenset({"OPERATOR", "MATERIAL", "WAREHOUSE_ADMIN", "ADMIN", "WORKSHOP_SUPERVISOR"})
+# 入库方向（执行时增加库存）的流转类型
+TRANSFER_INBOUND_TYPES = frozenset({"INBOUND", "RETURN"})
 ROLES = ("OPERATOR", "MATERIAL", "WAREHOUSE_ADMIN", "ADMIN", "PLANNER", "WORKSHOP_SUPERVISOR", "ASSEMBLER")
 ASSEMBLY_STATUSES = ("WAITING_MATERIAL", "MATERIAL_ACCEPTED", "IN_PROGRESS", "PAUSED_FOR_TEMPORARY_TRANSFER", "COMPLETED")
 HANDOVER_STATES = ("PENDING", "CONFIRMED", "REJECTED", "CANCELLED")
@@ -4394,6 +4406,9 @@ def order_task_detail(
     # 机台物料：按机台号关联订单设备维度（order_devices.device_no）。
     materials = [
         {
+            # 0.14.0：补充需求/物料/订单机台主键，供管理台勾选批量操作（新增字段，原字段不变）
+            "requirementId": r["requirement_id"], "materialId": r["material_id"],
+            "deviceId": r["order_device_id"],
             "materialCode": r["material_code"], "materialName": r["material_name"],
             "materialCategory": r["material_category"],
             "specification": r["specification"], "unit": r["unit"],
@@ -4403,7 +4418,8 @@ def order_task_detail(
             "statusCode": r["status_code"],
         }
         for r in c.execute(
-            """SELECT m.code AS material_code, m.name AS material_name,
+            """SELECT r.id AS requirement_id, r.material_id, od.id AS order_device_id,
+                      m.code AS material_code, m.name AS material_name,
                       m.category AS material_category,
                       m.specification, m.unit, r.required_quantity,
                       r.arrived_quantity, r.in_stock_quantity, r.status_code
@@ -5608,10 +5624,26 @@ def create_transfer(
                        f"type 必须为 {'/'.join(TRANSFER_TYPES)}", trace_id=trace_id)
     if not body.items:
         raise ApiError(400, CODE_VALIDATION_ERROR, "items 不能为空", trace_id=trace_id)
-    if body.type in {"INBOUND", "OUTBOUND"} and user["role"] not in {
-        "OPERATOR", "MATERIAL", "ADMIN",
-    }:
-        raise ApiError(403, CODE_FORBIDDEN, "当前角色不能提交入库或出库申请", trace_id=trace_id)
+    allowed_roles = TRANSFER_CREATE_ROLES.get(body.type)
+    if allowed_roles is not None and user["role"] not in allowed_roles:
+        if body.type in {"INBOUND", "OUTBOUND"}:
+            message = "当前角色不能提交入库或出库申请"
+        elif body.type == "RETURN":
+            message = "当前角色不能提交退料申请"
+        else:
+            message = "当前角色不能提交厂内调拨申请"
+        raise ApiError(403, CODE_FORBIDDEN, message, trace_id=trace_id)
+    if body.type == "TRANSFER":
+        # 厂内调拨 = 来源库位扣减 + 目标库位增加，两端库位都必须明确且不同
+        for item in body.items:
+            src = (item.sourceLocationCode or "").strip()
+            dst = (item.targetLocationCode or "").strip()
+            if not src or not dst:
+                raise ApiError(400, CODE_VALIDATION_ERROR,
+                               "厂内调拨必须同时填写来源库位与目标库位", trace_id=trace_id)
+            if src == dst:
+                raise ApiError(400, CODE_VALIDATION_ERROR,
+                               "来源库位与目标库位不能相同", trace_id=trace_id)
 
     op_id_str = str(body.clientOperationId)
     with tx("流转申请创建失败", trace_id=trace_id) as c:
@@ -5744,7 +5776,13 @@ def _execute_transfer_items(
                 )
 
             transfer_type = row["type"]
-            delta = quantity if transfer_type == "INBOUND" else -quantity
+            # 入库/退料增加库存；厂内调拨只在库位间移动，汇总数量不变；其余扣减
+            if transfer_type in TRANSFER_INBOUND_TYPES:
+                delta = quantity
+            elif transfer_type == "TRANSFER":
+                delta = 0
+            else:
+                delta = -quantity
 
             if transfer_type in {"OUTBOUND", "TRANSFER"}:
                 if material["available_quantity"] < quantity:
@@ -5770,7 +5808,7 @@ def _execute_transfer_items(
             # 同步库位明细，避免汇总与明细漂移
             if source_code and transfer_type in {"OUTBOUND", "TRANSFER"}:
                 _adjust_location_qty(c, material["id"], source_code, -quantity, trace_id)
-            if target_code and transfer_type in {"INBOUND", "TRANSFER"}:
+            if target_code and (transfer_type in TRANSFER_INBOUND_TYPES or transfer_type == "TRANSFER"):
                 _adjust_location_qty(c, material["id"], target_code, quantity, trace_id)
 
         execution_time = now()
@@ -7033,7 +7071,7 @@ def create_exception(
     x_request_id: str | None = Header(default=None),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
 ) -> dict[str, Any]:
-    if user["role"] not in {"OPERATOR", "MATERIAL", "WAREHOUSE_ADMIN", "ADMIN", "WORKSHOP_SUPERVISOR"}:
+    if user["role"] not in EXCEPTION_CREATE_ROLES:
         raise HTTPException(403, "无异常创建权限")
     trace_id, operation = _write_trace_and_operation(x_request_id, idempotency_key, body.clientOperationId)
     eid = "ex_" + uuid.UUID(operation).hex; c = db()
