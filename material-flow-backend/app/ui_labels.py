@@ -38,7 +38,7 @@ LABELS: dict[str, dict[str, str]] = {
     "transfer_status": {
         "PENDING_APPROVAL": "待审批", "APPROVED": "已审批", "REJECTED": "已驳回", "EXECUTED": "已执行",
     },
-    "transfer_type": {"INBOUND": "入库", "OUTBOUND": "出库", "TRANSFER": "调拨", "STOCKTAKE": "盘点"},
+    "transfer_type": {"INBOUND": "入库", "OUTBOUND": "出库", "TRANSFER": "调拨", "STOCKTAKE": "盘点", "RETURN": "退料"},
     "handover_status": {"PENDING": "待确认", "CONFIRMED": "已确认", "REJECTED": "已驳回", "CANCELLED": "已取消"},
     "exception_status": {
         "PENDING": "待处理", "OPEN": "待处理", "IN_PROGRESS": "处理中",
