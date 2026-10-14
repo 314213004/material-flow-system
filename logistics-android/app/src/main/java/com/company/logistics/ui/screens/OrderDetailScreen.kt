@@ -26,6 +26,9 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +49,13 @@ import com.company.logistics.model.DeviceModelMap
 import com.company.logistics.model.MaterialStatusCode
 import com.company.logistics.model.OrderMaterialItem
 import com.company.logistics.model.OrderMaterialStatus
+import com.company.logistics.model.MaterialBatchAction
+import com.company.logistics.model.UserRole
+import com.company.logistics.model.batchKey
+import com.company.logistics.ui.components.MaterialBatchActionBar
+import com.company.logistics.ui.components.MaterialBatchCheckBox
+import com.company.logistics.ui.components.MaterialBatchDialog
+import com.company.logistics.ui.components.MaterialBatchSubmission
 import com.company.logistics.ui.components.AppCard
 import com.company.logistics.ui.components.EmptyState
 import com.company.logistics.ui.components.formatServerTime
@@ -84,11 +94,36 @@ fun OrderDetailScreen(
     recentOrders: List<com.company.logistics.data.remote.MaterialFlowApi.RecentOrderItem> = emptyList(),
     recentOrdersError: String? = null,
     onRetryRecent: () -> Unit = {},
+    role: UserRole = UserRole.OPERATOR,
+    readOnly: Boolean = false,
+    batchSubmitting: Boolean = false,
+    onSubmitMaterialBatch: (MaterialBatchSubmission) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var selectedDeviceId by remember(status) { mutableStateOf<String?>(null) }
     val context = LocalContext.current
-    val selectedItems = status?.items?.filter { it.deviceId == selectedDeviceId }.orEmpty()
+    // 物料勾选批量操作：勾选键 = 机台 + 物料（同一物料可挂多台机台），切换订单时清空
+    val batchActions = remember(role) { MaterialBatchAction.availableFor(role) }
+    var checkedKeys by remember(status?.documentNo) { mutableStateOf(setOf<String>()) }
+    var batchAction by remember { mutableStateOf<MaterialBatchAction?>(null) }
+    val allItems = status?.items.orEmpty()
+    val currentBatchAction = batchAction
+    if (status != null && currentBatchAction != null && checkedKeys.isNotEmpty()) {
+        val batchItems = allItems.filter { it.batchKey in checkedKeys }
+        MaterialBatchDialog(
+            action = currentBatchAction,
+            items = batchItems,
+            orders = listOf(status.documentNo to (status.documentNo + (status.productName?.takeIf { it.isNotBlank() }?.let { " · $it" } ?: ""))),
+            submitting = batchSubmitting,
+            onDismiss = { batchAction = null },
+            onConfirm = { submission ->
+                batchAction = null
+                onSubmitMaterialBatch(submission)
+                checkedKeys = emptySet()
+            },
+        )
+    }
+    val selectedItems = allItems.filter { it.deviceId == selectedDeviceId }
     if (status != null && selectedDeviceId != null && selectedItems.isNotEmpty()) {
         DeviceMaterialDetail(
             deviceType = selectedItems.first().deviceType.orEmpty(),
@@ -96,6 +131,18 @@ fun OrderDetailScreen(
             items = selectedItems,
             onBack = { selectedDeviceId = null },
             modifier = modifier,
+            batch = {
+                OrderMaterialBatchSection(
+                    items = selectedItems,
+                    checkedKeys = checkedKeys,
+                    onCheckedChange = { checkedKeys = it },
+                    actions = batchActions,
+                    readOnly = readOnly,
+                    submitting = batchSubmitting,
+                    onAction = { batchAction = it },
+                    showDevice = false,
+                )
+            },
         )
         return
     }
@@ -445,7 +492,169 @@ fun OrderDetailScreen(
             }
         }
 
+        // 物料需求明细：逐行勾选 + 全选，批量发起出库申请 / 退料 / 厂内调拨 / 异常提报
+        if (status.items.isNotEmpty() && batchActions.isNotEmpty()) {
+            VSpace(Spacing.md)
+            OrderMaterialBatchSection(
+                items = status.items,
+                checkedKeys = checkedKeys,
+                onCheckedChange = { checkedKeys = it },
+                actions = batchActions,
+                readOnly = readOnly,
+                submitting = batchSubmitting,
+                onAction = { batchAction = it },
+            )
+        }
+
         VSpace(Spacing.xxl)
+    }
+}
+
+/**
+ * 订单物料需求明细（可勾选）：搜索 + 批量操作栏 + 紧凑行 + 分页（每页 20 条）。
+ * 勾选状态由调用方持有，跨搜索/分页保留；全选只作用于当前筛选结果。
+ */
+@Composable
+private fun OrderMaterialBatchSection(
+    items: List<OrderMaterialItem>,
+    checkedKeys: Set<String>,
+    onCheckedChange: (Set<String>) -> Unit,
+    actions: List<MaterialBatchAction>,
+    readOnly: Boolean,
+    submitting: Boolean,
+    onAction: (MaterialBatchAction) -> Unit,
+    showDevice: Boolean = true,
+) {
+    if (actions.isEmpty() || items.isEmpty()) return
+    SectionTitle("物料需求明细（${items.size}）", trailing = "勾选后批量操作")
+    VSpace(Spacing.sm)
+    AppCard {
+        var query by remember(items) { mutableStateOf("") }
+        var page by remember(items) { mutableStateOf(1) }
+        LaunchedEffect(query) { page = 1 }
+        val q = query.trim()
+        val filtered = items.filter { m ->
+            q.isBlank() || m.materialCode.contains(q, true) || m.name.contains(q, true) ||
+                m.deviceNo?.contains(q, true) == true
+        }
+        val pageSize = 20
+        val pageCount = if (filtered.isEmpty()) 1 else (filtered.size + pageSize - 1) / pageSize
+        val safePage = page.coerceIn(1, pageCount)
+        val paged = filtered.drop((safePage - 1) * pageSize).take(pageSize)
+        OutlinedTextField(
+            value = query,
+            onValueChange = { query = it },
+            placeholder = { Text(if (showDevice) "搜索编码 / 名称 / 机台" else "搜索编码 / 名称", fontSize = 13.sp) },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        VSpace(Spacing.sm)
+        val filteredKeys = filtered.map { it.batchKey }
+        val allChecked = filtered.isNotEmpty() && checkedKeys.containsAll(filteredKeys)
+        MaterialBatchActionBar(
+            visibleCount = filtered.size,
+            selectedCount = checkedKeys.size,
+            allChecked = allChecked,
+            actions = actions,
+            readOnly = readOnly,
+            submitting = submitting,
+            onToggleAll = {
+                onCheckedChange(if (allChecked) checkedKeys - filteredKeys.toSet() else checkedKeys + filteredKeys)
+            },
+            onClear = { onCheckedChange(emptySet()) },
+            onAction = onAction,
+        )
+        if (paged.isEmpty()) {
+            Text(
+                "没有匹配的物料",
+                fontSize = 13.sp,
+                color = LogisticsTheme.colors.textSecondary,
+                modifier = Modifier.padding(vertical = 12.dp),
+            )
+        }
+        paged.forEach { item ->
+            androidx.compose.material3.HorizontalDivider(
+                color = LogisticsTheme.colors.border.copy(alpha = 0.4f),
+                thickness = 0.5.dp,
+            )
+            val key = item.batchKey
+            OrderBatchMaterialRow(
+                item = item,
+                checked = key in checkedKeys,
+                showDevice = showDevice,
+                onToggle = { onCheckedChange(if (key in checkedKeys) checkedKeys - key else checkedKeys + key) },
+            )
+        }
+        if (pageCount > 1) {
+            VSpace(Spacing.sm)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                androidx.compose.material3.TextButton(onClick = { page = safePage - 1 }, enabled = safePage > 1) {
+                    Text("上一页", fontSize = 12.sp)
+                }
+                Text(
+                    "第 $safePage / $pageCount 页 · 共 ${filtered.size} 项",
+                    fontSize = 12.sp,
+                    color = LogisticsTheme.colors.textSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.weight(1f),
+                )
+                androidx.compose.material3.TextButton(onClick = { page = safePage + 1 }, enabled = safePage < pageCount) {
+                    Text("下一页", fontSize = 12.sp)
+                }
+            }
+        }
+    }
+}
+
+/** 可勾选的紧凑物料行：勾选框 | 编码 + 名称/机台 | 需/到/库 | 状态标签。整行点击切换勾选。 */
+@Composable
+private fun OrderBatchMaterialRow(
+    item: OrderMaterialItem,
+    checked: Boolean,
+    showDevice: Boolean,
+    onToggle: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onToggle)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        MaterialBatchCheckBox(checked)
+        Column(Modifier.weight(1f)) {
+            Text(
+                item.materialCode,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+                fontFamily = LogisticsType.MonoFamily,
+                color = LogisticsTheme.colors.textPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                item.name + if (showDevice && !item.deviceNo.isNullOrBlank()) " · 机台 ${item.deviceNo}" else "",
+                fontSize = 11.sp,
+                color = LogisticsTheme.colors.textSecondary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Spacer(Modifier.width(6.dp))
+        Text(
+            "需${item.requiredQuantity} 到${item.arrivedQuantity} 库${item.inStockQuantity}",
+            fontSize = 11.sp,
+            fontFamily = LogisticsType.MonoFamily,
+            color = LogisticsTheme.colors.textSecondary,
+            maxLines = 1,
+        )
+        Spacer(Modifier.width(6.dp))
+        StatusTag(
+            label = item.effectiveStatusLabel,
+            color = item.statusCode.tagTextColor(),
+            containerColor = item.statusCode.containerColor,
+            symbol = item.statusCode.symbol,
+        )
     }
 }
 
@@ -649,6 +858,7 @@ private fun DeviceMaterialDetail(
     items: List<OrderMaterialItem>,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
+    batch: @Composable () -> Unit = {},
 ) {
     Column(modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = Dimens.PagePadding)) {
         Spacer(Modifier.height(Spacing.sm))
@@ -661,6 +871,9 @@ private fun DeviceMaterialDetail(
             VSpace(Spacing.sm)
             Text("物料详情（${items.size}）", fontSize = 13.sp, color = LogisticsTheme.colors.textSecondary)
         }
+        VSpace(Spacing.md)
+        // 机台维度的勾选批量操作（与订单页共用勾选状态与对话框）
+        batch()
         VSpace(Spacing.md)
         items.forEach {
             OrderMaterialRow(it)

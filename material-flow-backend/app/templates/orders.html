@@ -111,7 +111,8 @@
     {% endfor %}
   </div>
   {{ pager(task_page, task_pages, none, "", {"order_no": order_no, "task_size": task_size, "task_q": task_q}, "task_page") }}
-  <div id="mat-panel">
+  <script src="{{ static_url('admin/material-batch.js') }}" defer></script>
+<div id="mat-panel">
   {% include "_order_materials.html" %}
   </div>
 <script>

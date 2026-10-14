@@ -1,5 +1,7 @@
 <div class="card" style="margin-top:16px">
   <h3>机台物料</h3>
+  {% from "_material_batch.html" import batch_bar, row_check, batch_dialog %}
+  {% set _mb_actions = material_batch_actions_for(user["role"]) if user else [] %}
   {% set _q = request.query_params.get("q", "").strip() %}
   {% set _cat = request.query_params.get("cat", "").strip() %}
   {% set _all = detail.materials or [] %}
@@ -35,11 +37,14 @@
   {% if _page > _pages and _pages > 0 %}{% set _page = _pages %}{% endif %}
   {% set _items = _list[(_page-1)*_size:_page*_size] %}
   <p class="muted">共 {{ _total }} 条{% if _pages > 1 %}，第 {{ _page }}/{{ _pages }} 页{% endif %}</p>
+  <div data-mb-root data-order="{{ order_no }}" data-csrf="{{ csrf_token }}">
+  {{ batch_bar(_mb_actions) }}
   <div class="mat-list">
     {% for m in _items %}
     {% set _mc = (m.materialCategory or m.material_category or "")|string %}
     {% set _cbadge = {"电气": "b-info", "机械": "b-warn"}.get(_mc, "b-mute") %}
     <div class="mat-row">
+      {{ row_check(_mb_actions, m.requirementId, m.materialCode, m.materialName, m.requiredQuantity, m.inStockQuantity, detail.deviceNo) }}
       <span class="mat-code">{{ m.materialCode or "—" }}</span>
       <span class="mat-name">{{ m.materialName or "—" }}</span>
       <span class="mat-nums">需<b>{{ m.requiredQuantity if m.requiredQuantity is not none else "—" }}{{ m.unit or "" }}</b>到<b>{{ m.arrivedQuantity if m.arrivedQuantity is not none else "—" }}</b>库<b>{{ m.inStockQuantity if m.inStockQuantity is not none else "—" }}</b></span>
@@ -62,6 +67,8 @@
     {% else %}
     <p class="muted">该机台暂无物料需求</p>
     {% endfor %}
+  </div>
+  {{ batch_dialog(_mb_actions) }}
   </div>
   {% from "_pagination.html" import pager %}
   {{ pager(_page, _pages, none, "", {"q": _q, "cat": _cat, "size": _size}, "page", partial=true) }}

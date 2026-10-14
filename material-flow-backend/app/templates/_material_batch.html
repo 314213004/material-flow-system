@@ -1,0 +1,63 @@
+{#- 0.14.0：订单页 / 机台页物料勾选批量操作（出库申请 / 退料 / 厂内调拨 / 异常提报）。
+    按钮按当前角色裁剪（material_batch_actions_for 与 API 创建接口同一口径），服务端仍逐条鉴权。
+    交互脚本：static/admin/material-batch.js（勾选跨分页保留，结果逐条回显）。 -#}
+
+{% macro batch_bar(actions) -%}
+{% if actions %}
+<div class="mb-bar" data-mb-bar>
+  <label class="mb-all-label"><input type="checkbox" class="mb-all"> 全选本页</label>
+  <span class="muted">已选 <b class="mb-count">0</b> 项</span>
+  <button type="button" class="btn btn-sm btn-secondary mb-clear">清空勾选</button>
+  <span class="mb-acts">
+    {% for code, label in actions %}
+    <button type="button" class="btn btn-sm mb-act" data-action="{{ code }}" data-label="{{ label }}" disabled>{{ label }}</button>
+    {% endfor %}
+  </span>
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro row_check(actions, requirement_id, code, name, required, in_stock, device_no) -%}
+{% if actions and requirement_id %}
+<label class="mb-check" title="勾选后可批量操作">
+  <input type="checkbox" class="mb-row" value="{{ requirement_id }}"
+         data-code="{{ code }}" data-name="{{ name }}" data-req="{{ required if required is not none else 0 }}"
+         data-stock="{{ in_stock if in_stock is not none else 0 }}" data-device="{{ device_no or '' }}">
+</label>
+{% endif %}
+{%- endmacro %}
+
+{% macro batch_dialog(actions) -%}
+{% if actions %}
+<div class="ui-confirm-mask mb-mask" role="dialog" aria-modal="true">
+  <form class="ui-confirm mb-dialog" novalidate>
+    <h3 class="mb-title">批量操作</h3>
+    <p class="mb-desc"></p>
+    <div class="mb-items table-wrap"></div>
+    <div class="mb-field" data-for="TRANSFER">
+      <label>来源库位（可选，留空则逐条自动选择库存最多的库位）
+        <input type="text" name="sourceLocation" maxlength="64" autocomplete="off"></label>
+    </div>
+    <div class="mb-field" data-for="TRANSFER RETURN">
+      <label class="mb-target-label">目标库位
+        <input type="text" name="targetLocation" maxlength="64" autocomplete="off"></label>
+    </div>
+    <div class="mb-field" data-for="EXCEPTION">
+      <label>异常类型
+        <select name="exceptionType">
+          {% for code, label in exception_type_labels.items() %}
+          <option value="{{ code }}">{{ label }}</option>
+          {% endfor %}
+        </select></label>
+    </div>
+    <label class="mb-remark-label"><span class="mb-remark-text">备注（可选）</span>
+      <textarea name="remark" maxlength="400" rows="2"></textarea></label>
+    <div class="mb-result" aria-live="polite"></div>
+    <div class="btn-row">
+      <button type="button" class="btn btn-secondary mb-cancel">取消</button>
+      <button type="submit" class="btn mb-ok">提交</button>
+    </div>
+  </form>
+</div>
+{% endif %}
+{%- endmacro %}

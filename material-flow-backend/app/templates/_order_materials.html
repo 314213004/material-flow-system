@@ -1,4 +1,6 @@
   <h4>物料需求</h4>
+  {% from "_material_batch.html" import batch_bar, row_check, batch_dialog %}
+  {% set _mb_actions = material_batch_actions_for(user["role"]) if user else [] %}
   {% set mat_q = request.query_params.get("mat_q", "").strip() %}
   {% set mat_cat = request.query_params.get("mat_cat", "").strip() %}
   {% set mat_list_all = detail.get("materials") or [] %}
@@ -40,6 +42,8 @@
   {% set start = (page - 1) * per_page %}
   {% set page_items = mat_list[start:start + per_page] %}
   <p class="muted">共 {{ total }} 条{% if total_pages > 1 %}，第 {{ page }}/{{ total_pages }} 页{% endif %}</p>
+  <div data-mb-root data-order="{{ order_no }}" data-csrf="{{ csrf_token }}">
+  {{ batch_bar(_mb_actions) }}
   <div class="mat-list">
     {% for m in page_items %}
     {% set _mcode = m.get("materialCode") or m.get("material_id") or m.get("materialId") or "—" %}
@@ -52,6 +56,7 @@
     {% set st = m.get("statusCode") or m.get("status_code") or m.get("requirement_status_code") or m.get("status") %}
     {% set _cls = {"OUT_OF_STOCK": "st-red", "REJECTED": "st-red", "CANCELLED": "st-neutral", "ARRIVED": "st-yellow", "PENDING": "st-yellow", "OUTBOUND_PENDING": "st-yellow", "IN_STOCK": "st-green", "PICKED_UP": "st-green", "AT_STATION": "st-green", "OUTBOUND_CONFIRMED": "st-green", "OUTBOUND_APPROVED": "st-blue"}.get(st, "st-neutral") %}
     <div class="mat-row">
+      {{ row_check(_mb_actions, m.get("requirementId"), _mcode, _mname, m.get("requiredQuantity"), m.get("inStockQuantity"), m.get("deviceNo")) }}
       <span class="mat-code">{{ _mcode }}</span>
       <span class="mat-name">{{ _mname }}</span>
       <span class="mat-nums">需<b>{{ _req }}</b>到<b>{{ _arr }}</b>库<b>{{ _stk }}</b></span>
@@ -72,6 +77,8 @@
     {% else %}
     <p class="muted">暂无物料需求（或不在您的可见范围内）</p>
     {% endfor %}
+  </div>
+  {{ batch_dialog(_mb_actions) }}
   </div>
   {% from "_pagination.html" import pager %}
   {{ pager(page, total_pages, none, "", {"order_no": order_no, "mat_q": mat_q, "mat_cat": mat_cat, "mat_size": per_page}, "mat_page", partial=true) }}

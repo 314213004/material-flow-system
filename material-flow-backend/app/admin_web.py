@@ -42,6 +42,13 @@ from app.main import (
     ROLES,
     TransferAction,
     TransferApproval,
+    Transfer,
+    TransferItem,
+    ExceptionCreate,
+    TRANSFER_CREATE_ROLES,
+    EXCEPTION_CREATE_ROLES,
+    create_transfer as api_create_transfer,
+    create_exception as api_create_exception,
     add_employee,
     approve as api_approve,
     audit_logs as api_audit_logs,
@@ -770,6 +777,7 @@ TRANSFER_TYPE_LABELS = {
     "OUTBOUND": "出库",
     "TRANSFER": "调拨",
     "STOCKTAKE": "盘点",
+    "RETURN": "退料",
 }
 
 TRANSFER_EXECUTE_VERBS = {
@@ -777,6 +785,7 @@ TRANSFER_EXECUTE_VERBS = {
     "OUTBOUND": "执行出库",
     "TRANSFER": "执行调拨",
     "STOCKTAKE": "执行盘点",
+    "RETURN": "执行退料",
 }
 
 HANDOVER_STATUS_LABELS = {
@@ -1742,6 +1751,240 @@ def admin_order_task(request: Request, order_no: str, task_id: str):
         "order_task.html",
         ctx,
     )
+
+
+# ==================== 0.14.0：订单 / 机台物料勾选批量操作 ====================
+
+# 批量动作 → (中文名, 底层能力)。出库/退料/调拨走 /api/v1/transfer-requests，异常走 /api/v1/exceptions。
+MATERIAL_BATCH_ACTIONS: dict[str, str] = {
+    "OUTBOUND": "出库申请",
+    "RETURN": "退料",
+    "TRANSFER": "厂内调拨",
+    "EXCEPTION": "异常提报",
+}
+MATERIAL_BATCH_MAX_ITEMS = 100
+EXCEPTION_TYPE_LABELS: dict[str, str] = {
+    "QUANTITY_MISMATCH": "数量不符",
+    "DAMAGE": "损坏",
+    "LOSS": "丢失",
+    "QUALITY": "质量问题",
+    "OTHER": "其他",
+}
+
+
+def material_batch_actions_for(role: str | None) -> list[tuple[str, str]]:
+    """当前角色可发起的批量动作（与 API 创建接口的角色口径一致，页面只展示可用按钮）。"""
+    allowed: list[tuple[str, str]] = []
+    for code, label in MATERIAL_BATCH_ACTIONS.items():
+        roles = EXCEPTION_CREATE_ROLES if code == "EXCEPTION" else TRANSFER_CREATE_ROLES.get(code)
+        if roles is not None and role in roles:
+            allowed.append((code, label))
+    return allowed
+
+
+templates.env.globals["material_batch_actions_for"] = material_batch_actions_for
+templates.env.globals["exception_type_labels"] = EXCEPTION_TYPE_LABELS
+
+
+def _batch_json(ok: bool, status_code: int = 200, **payload: Any) -> JSONResponse:
+    return JSONResponse({"ok": ok, **payload}, status_code=status_code,
+                        headers={"Cache-Control": "no-store"})
+
+
+def _form_int(form: Any, key: str) -> int | None:
+    raw = str(form.get(key, "") or "").strip()
+    if not raw:
+        return None
+    if not re.fullmatch(r"\d{1,9}", raw):
+        raise ValueError(key)
+    return int(raw)
+
+
+def _pick_source_location(c: sqlite3.Connection, material_id: str, quantity: int) -> str | None:
+    """调拨来源库位：优先库存足量的库位，其次任一有库存的库位。"""
+    rows = c.execute(
+        "SELECT l.code, i.quantity FROM inventory i JOIN locations l ON l.id=i.location_id"
+        " WHERE i.material_id=? AND i.quantity>0 ORDER BY i.quantity DESC, l.code",
+        (material_id,),
+    ).fetchall()
+    for row in rows:
+        if row["quantity"] >= quantity:
+            return row["code"]
+    return rows[0]["code"] if rows else None
+
+
+@router.post("/admin/orders/{order_no}/materials/batch")
+async def admin_order_material_batch(request: Request, order_no: str):
+    """订单页 / 机台页勾选物料批量操作：逐条调用既有 API（同一会话用户、同一 RBAC 与审计）。
+
+    每条物料独立提交，部分失败不影响已成功条目；返回逐条结果 JSON。
+    """
+    user = _session_user(request)
+    if user is None:
+        return _batch_json(False, 401, error="登录已失效，请重新登录")
+    if user["role"] not in REPORT_ROLES:
+        return _batch_json(False, 403, error="当前角色无权访问订单页面")
+    form = await request.form()
+    if not _csrf_ok(str(form.get("csrf_token", "")), user["csrf_token"]):
+        return _batch_json(False, 403, error="CSRF 校验失败，请刷新页面后重试")
+    action = str(form.get("action", "")).strip().upper()
+    if action not in MATERIAL_BATCH_ACTIONS:
+        return _batch_json(False, 400, error="不支持的批量操作")
+    if action not in dict(material_batch_actions_for(user["role"])):
+        return _batch_json(False, 403, error=f"当前角色不能发起{MATERIAL_BATCH_ACTIONS[action]}")
+    req_ids: list[str] = []
+    for raw in form.getlist("requirementId"):
+        rid = str(raw).strip()
+        if rid and rid not in req_ids:
+            req_ids.append(rid)
+    if not req_ids:
+        return _batch_json(False, 400, error="请先勾选物料")
+    if len(req_ids) > MATERIAL_BATCH_MAX_ITEMS:
+        return _batch_json(False, 400, error=f"单次最多勾选 {MATERIAL_BATCH_MAX_ITEMS} 条物料")
+    remark = str(form.get("remark", "") or "").strip()
+    if len(remark) > 400:
+        return _batch_json(False, 400, error="备注最多 400 字")
+    target_location = str(form.get("targetLocation", "") or "").strip() or None
+    source_location = str(form.get("sourceLocation", "") or "").strip() or None
+    exception_type = str(form.get("exceptionType", "") or "OTHER").strip().upper()
+    if action == "EXCEPTION":
+        if exception_type not in EXCEPTION_TYPE_LABELS:
+            return _batch_json(False, 400, error="异常类型无效")
+        if not remark:
+            return _batch_json(False, 400, error="异常提报必须填写描述")
+    if action == "TRANSFER" and not target_location:
+        return _batch_json(False, 400, error="厂内调拨必须填写目标库位")
+    try:
+        quantities = {rid: _form_int(form, f"qty_{rid}") for rid in req_ids}
+    except ValueError:
+        return _batch_json(False, 400, error="数量必须是非负整数")
+    # 批次号：前端每次打开对话框生成一次，重试沿用。每条的幂等键由批次号 + 动作 + 需求 ID 派生，
+    # 同一批次重复提交时既有 API 按幂等键回放，不会重复建单。旧客户端未传时退化为每次新建。
+    try:
+        batch_id = uuid.UUID(str(form.get("batchId", "") or "").strip())
+    except ValueError:
+        batch_id = uuid.uuid4()
+
+    # 下面是逐条的同步 SQLite 写入（最多 MATERIAL_BATCH_MAX_ITEMS 条），放到线程池里执行，
+    # 不阻塞事件循环（见 0.8.2 事故：async 路由里不得直接做阻塞 IO）。
+    from starlette.concurrency import run_in_threadpool
+    return await run_in_threadpool(
+        _run_material_batch, request, user, order_no, action, req_ids, quantities, remark,
+        target_location, source_location, exception_type, batch_id,
+    )
+
+
+def _run_material_batch(request: Request, user: Any, order_no: str, action: str, req_ids: list[str],
+                        quantities: dict[str, int | None], remark: str, target_location: str | None,
+                        source_location: str | None, exception_type: str, batch_id: uuid.UUID):
+    c = db()
+    try:
+        order = c.execute("SELECT id FROM production_orders WHERE order_no=?", (order_no,)).fetchone()
+        if order is None:
+            return _batch_json(False, 404, error="订单不存在")
+        for code in (target_location, source_location):
+            if code and not c.execute("SELECT 1 FROM locations WHERE code=?", (code,)).fetchone():
+                return _batch_json(False, 400, error=f"库位不存在：{code}")
+        marks = ",".join("?" for _ in req_ids)
+        rows = {
+            r["id"]: r for r in c.execute(
+                f"""SELECT r.id, r.device_id, r.material_id, r.required_quantity, r.in_stock_quantity,
+                           m.code AS material_code, m.version AS material_version, od.device_no
+                      FROM order_material_requirements r
+                      JOIN materials m ON m.id = r.material_id
+                      LEFT JOIN order_devices od ON od.id = r.device_id
+                     WHERE r.order_id = ? AND r.id IN ({marks})""",
+                [order["id"], *req_ids],
+            ).fetchall()
+        }
+        sources = {
+            rid: (source_location or _pick_source_location(
+                c, rows[rid]["material_id"],
+                quantities[rid] if quantities.get(rid) is not None else rows[rid]["required_quantity"]))
+            for rid in req_ids if rid in rows and action == "TRANSFER"
+        }
+    finally:
+        c.close()
+
+    succeeded: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for rid in req_ids:
+        row = rows.get(rid)
+        if row is None:
+            failed.append({"requirementId": rid, "materialCode": rid, "error": "物料需求不存在或不属于该订单"})
+            continue
+        code = row["material_code"]
+        if action == "EXCEPTION":
+            book = int(row["in_stock_quantity"] or 0)
+            qty = quantities.get(rid)
+            qty = book if qty is None else qty
+        else:
+            qty = quantities.get(rid)
+            if qty is None:  # 未填才取需求数；显式填 0 视为无效，不悄悄替换
+                qty = int(row["required_quantity"] or 0)
+            if qty < 1:
+                failed.append({"requirementId": rid, "materialCode": code, "error": "数量必须为正整数"})
+                continue
+        device_no = row["device_no"] or ""
+        full_remark = (f"机台：{device_no}；" if device_no else "") + remark
+        op_id = str(uuid.uuid5(batch_id, f"{action}:{rid}"))
+        try:
+            if action == "EXCEPTION":
+                result = api_create_exception(
+                    ExceptionCreate(
+                        orderNo=order_no, deviceId=row["device_id"], materialId=row["material_id"],
+                        type=exception_type, bookQuantity=book, actualQuantity=qty,
+                        description=full_remark[:500], clientOperationId=op_id,
+                    ),
+                    user=user, x_request_id=str(uuid.uuid4()), idempotency_key=op_id,
+                )
+                succeeded.append({"requirementId": rid, "materialCode": code, "id": result.get("exceptionId")})
+                continue
+            item_kwargs: dict[str, Any] = {
+                "materialId": row["material_id"], "quantity": qty,
+                "expectedInventoryVersion": int(row["material_version"] or 1),
+            }
+            if action == "RETURN" and target_location:
+                item_kwargs["targetLocationCode"] = target_location
+            if action == "TRANSFER":
+                src = sources.get(rid)
+                if not src:
+                    failed.append({"requirementId": rid, "materialCode": code, "error": "该物料无可用来源库位"})
+                    continue
+                item_kwargs["sourceLocationCode"] = src
+                item_kwargs["targetLocationCode"] = target_location
+            result = api_create_transfer(
+                Transfer(
+                    clientOperationId=op_id, type=action, documentNo=order_no,
+                    items=[TransferItem(**item_kwargs)], remark=full_remark[:500] or None,
+                ),
+                user=user, x_request_id=str(uuid.uuid4()), idempotency_key=op_id,
+            )
+            succeeded.append({"requirementId": rid, "materialCode": code, "id": result.get("requestId")})
+        except ApiError as exc:
+            failed.append({"requirementId": rid, "materialCode": code, "error": _api_error_message(exc)})
+        except HTTPException as exc:
+            failed.append({"requirementId": rid, "materialCode": code, "error": str(exc.detail or "提交失败")})
+        except ValidationError:
+            failed.append({"requirementId": rid, "materialCode": code, "error": "输入校验未通过"})
+
+    outcome = "SUCCESS" if not failed else ("FAILURE" if not succeeded else "PARTIAL")
+    c = db()
+    try:
+        audit(c, user["id"], user["role"], f"BATCH_{action}", "ORDER_MATERIALS", order_no,
+              outcome, _request_trace_id(request) or "web-admin")
+        c.commit()
+    finally:
+        c.close()
+    label = MATERIAL_BATCH_ACTIONS[action]
+    if not failed:
+        message = f"已提交 {len(succeeded)} 条{label}"
+    elif not succeeded:
+        message = f"批量{label}全部失败"
+    else:
+        message = f"已提交 {len(succeeded)} 条{label}，失败 {len(failed)} 条"
+    return _batch_json(bool(succeeded), 200, action=action, message=message,
+                       succeeded=succeeded, failed=failed)
 
 
 @router.get("/admin/orders/{order_no}/barcodes", response_class=HTMLResponse)

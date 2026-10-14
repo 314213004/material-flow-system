@@ -262,6 +262,20 @@ fun LogisticsApp(
                         recentOrders = state.recentOrders,
                         recentOrdersError = state.recentOrdersError,
                         onRetryRecent = { viewModel.loadRecentOrders(force = true) },
+                        role = state.role,
+                        readOnly = state.preview,
+                        batchSubmitting = state.batchSubmitting,
+                        onSubmitMaterialBatch = { b ->
+                            viewModel.submitMaterialBatch(
+                                action = b.action,
+                                lines = b.lines,
+                                orderNo = b.orderNo,
+                                remark = b.remark,
+                                targetLocation = b.targetLocation,
+                                sourceLocation = b.sourceLocation,
+                                exceptionType = b.exceptionType,
+                            )
+                        },
                     )
 
                     Screen.QUEUE -> QueueScreen(
@@ -376,13 +390,25 @@ fun LogisticsApp(
                         onSubmitMaterialRequest = { material, orderNo, qty, remark ->
                             viewModel.submitDeviceMaterialRequest(material, orderNo, qty, remark)
                         },
-                        onSubmitMaterialRequestBatch = { items, orderNo, remark ->
-                            viewModel.submitDeviceMaterialRequestBatch(items, orderNo, remark)
+                        onSubmitMaterialBatch = { b ->
+                            viewModel.submitMaterialBatch(
+                                action = b.action,
+                                lines = b.lines,
+                                orderNo = b.orderNo,
+                                remark = b.remark,
+                                targetLocation = b.targetLocation,
+                                sourceLocation = b.sourceLocation,
+                                exceptionType = b.exceptionType,
+                                contextDeviceNo = state.deviceDetail?.deviceNo,
+                                fallbackDeviceId = state.deviceDetail?.deviceId,
+                            )
                         },
                         onSubmitException = { deviceId, materialId, materialCode, orderNo, type, bookQty, actualQty, desc ->
                             viewModel.submitDeviceException(deviceId, materialId, materialCode, orderNo, type, bookQty, actualQty, desc)
                         },
                         role = state.role,
+                        readOnly = state.preview,
+                        batchSubmitting = state.batchSubmitting,
                         drawings = { deviceId ->
                             com.company.logistics.ui.screens.DrawingsCard(
                                 api = viewModel.repository.apiHandle,
