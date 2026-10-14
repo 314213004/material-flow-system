@@ -944,8 +944,40 @@ enum class OfflineOpType(val label: String) {
     LOCATION_BIND("库位绑定"),
     RELOCATION("厂内调拨"),
     STOCKTAKE("盘点"),
-    EXCEPTION("异常提报")
+    EXCEPTION("异常提报"),
+    /** 0.5.39：退料申请（后端流转类型 RETURN），离线重放见 LogisticsRepository.syncOne */
+    RETURN("退料")
 }
+
+// ==================== 物料勾选批量操作（订单页 / 机台页共用） ====================
+
+/**
+ * 物料勾选后的批量动作。[code] 为后端契约值：出库/退料/调拨走 POST /api/v1/transfer-requests 的 type，
+ * 异常走 POST /api/v1/exceptions。[allowedRoles] 与后端 TRANSFER_CREATE_ROLES / EXCEPTION_CREATE_ROLES 同口径，
+ * 仅用于裁剪按钮，最终以服务端鉴权为准。
+ */
+enum class MaterialBatchAction(val code: String, val label: String, private val allowedRoles: Set<UserRole>) {
+    OUTBOUND("OUTBOUND", "出库申请", setOf(UserRole.OPERATOR, UserRole.MATERIAL, UserRole.ADMIN)),
+    RETURN("RETURN", "退料", setOf(UserRole.OPERATOR, UserRole.MATERIAL, UserRole.ADMIN)),
+    RELOCATION("TRANSFER", "厂内调拨", setOf(UserRole.OPERATOR, UserRole.MATERIAL, UserRole.WAREHOUSE_ADMIN, UserRole.ADMIN)),
+    EXCEPTION(
+        "EXCEPTION", "异常提报",
+        setOf(UserRole.OPERATOR, UserRole.MATERIAL, UserRole.WAREHOUSE_ADMIN, UserRole.ADMIN, UserRole.WORKSHOP_SUPERVISOR),
+    );
+
+    fun allowedFor(role: UserRole): Boolean = role in allowedRoles
+
+    companion object {
+        fun availableFor(role: UserRole): List<MaterialBatchAction> = entries.filter { it.allowedFor(role) }
+    }
+}
+
+/** 批量操作中的一条物料及本次提交数量（出库/退料/调拨为正整数，异常为实际清点数量，可为 0）。 */
+data class MaterialBatchLine(val item: OrderMaterialItem, val quantity: Int)
+
+/** 勾选键：订单页同一物料可能挂在多台机台下，按「机台 + 物料」区分，机台页退化为物料 ID。 */
+val OrderMaterialItem.batchKey: String
+    get() = "${deviceId.orEmpty()}|$materialId"
 
 /** 异常提报类型选项：code to 中文标签 */
 val EXCEPTION_TYPE_OPTIONS = listOf(
