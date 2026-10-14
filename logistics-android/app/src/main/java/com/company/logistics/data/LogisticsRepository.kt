@@ -206,7 +206,7 @@ open class LogisticsRepository(
         api.resolveScan(rawValue)
     }
 
-    suspend fun materialInventory(code: String): Result<MaterialInventory> = resultOf {
+    open suspend fun materialInventory(code: String): Result<MaterialInventory> = resultOf {
         api.materialInventory(code)
     }
 
@@ -235,7 +235,7 @@ open class LogisticsRepository(
      * 队列实体字段不足以装下异常全部字段，orderNo/deviceId/type/bookQuantity/description
      * 打包为 JSON 存入 remark，quantity 存 actualQuantity，重放时解析还原。
      */
-    suspend fun submitExceptionQueued(
+    open suspend fun submitExceptionQueued(
         materialCode: String,
         materialId: String,
         orderNo: String,
@@ -521,7 +521,7 @@ open class LogisticsRepository(
      * 提交厂内出库（领料）申请。documentNo 写入关联订单号，便于机台详情按订单筛出。
      * 失败时按错误类型决定是否落本地队列。
      */
-    suspend fun submitOutbound(
+    open suspend fun submitOutbound(
         deviceMaterial: com.company.logistics.model.OrderMaterialItem,
         inventory: MaterialInventory,
         documentNo: String?,
@@ -553,6 +553,105 @@ open class LogisticsRepository(
             )
         }
     )
+
+    /**
+     * 提交退料申请（RETURN）：按入库审批规则处理，审批执行后增加库存与目标库位数量。
+     * 离线时入队；documentNo 等打包进 remark JSON，重放时还原（见 [syncOne]）。
+     */
+    open suspend fun submitReturn(
+        deviceMaterial: com.company.logistics.model.OrderMaterialItem,
+        inventory: MaterialInventory,
+        documentNo: String?,
+        quantity: Int,
+        targetLocation: String?,
+        remark: String?,
+        clientOperationId: String? = null
+    ): SubmitResult {
+        val target = targetLocation?.takeIf { it.isNotBlank() } ?: inventory.primaryLocation
+        return submit(
+            opType = OfflineOpType.RETURN,
+            materialCode = inventory.material.code,
+            materialId = inventory.material.id,
+            quantity = quantity,
+            targetLocation = target,
+            expectedInventoryVersion = inventory.version,
+            remark = packQueuedTransferRemark(documentNo, null, remark),
+            clientOperationId = clientOperationId,
+            remoteCall = { clientOpId ->
+                api.createTransferRequest(
+                    clientOperationId = clientOpId,
+                    type = "RETURN",
+                    documentNo = documentNo,
+                    items = listOf(
+                        TransferItem(
+                            materialId = inventory.material.id,
+                            quantity = quantity,
+                            targetLocationCode = target,
+                            expectedInventoryVersion = inventory.version
+                        )
+                    ),
+                    remark = remark
+                )
+            }
+        )
+    }
+
+    /**
+     * 提交厂内调拨申请（后端流转类型 TRANSFER）：来源库位扣减、目标库位增加，汇总数量不变。
+     * 来源/目标库位均必填且不同（后端同样校验）。离线时入队，来源库位打包进 remark JSON。
+     */
+    open suspend fun submitRelocation(
+        deviceMaterial: com.company.logistics.model.OrderMaterialItem,
+        inventory: MaterialInventory,
+        documentNo: String?,
+        quantity: Int,
+        sourceLocation: String,
+        targetLocation: String,
+        remark: String?,
+        clientOperationId: String? = null
+    ): SubmitResult {
+        if (sourceLocation.isBlank() || targetLocation.isBlank()) {
+            return SubmitResult.Failure("厂内调拨必须同时填写来源库位与目标库位", retryable = false)
+        }
+        if (sourceLocation == targetLocation) {
+            return SubmitResult.Failure("来源库位与目标库位不能相同", retryable = false)
+        }
+        return submit(
+            opType = OfflineOpType.RELOCATION,
+            materialCode = inventory.material.code,
+            materialId = inventory.material.id,
+            quantity = quantity,
+            targetLocation = targetLocation,
+            expectedInventoryVersion = inventory.version,
+            remark = packQueuedTransferRemark(documentNo, sourceLocation, remark),
+            clientOperationId = clientOperationId,
+            remoteCall = { clientOpId ->
+                api.createTransferRequest(
+                    clientOperationId = clientOpId,
+                    type = "TRANSFER",
+                    documentNo = documentNo,
+                    items = listOf(
+                        TransferItem(
+                            materialId = inventory.material.id,
+                            quantity = quantity,
+                            sourceLocationCode = sourceLocation,
+                            targetLocationCode = targetLocation,
+                            expectedInventoryVersion = inventory.version
+                        )
+                    ),
+                    remark = remark
+                )
+            }
+        )
+    }
+
+    /** 退料/调拨入队时，队列实体缺 documentNo/sourceLocation 字段，与异常同样打包为 JSON 存 remark。 */
+    private fun packQueuedTransferRemark(documentNo: String?, sourceLocation: String?, remark: String?): String =
+        JSONObject().apply {
+            put("documentNo", documentNo ?: JSONObject.NULL)
+            put("sourceLocation", sourceLocation ?: JSONObject.NULL)
+            put("remark", remark ?: JSONObject.NULL)
+        }.toString()
 
     /** 提交库位绑定（简化流程，无需审批） */
     suspend fun submitLocationBinding(
@@ -698,6 +797,34 @@ open class LogisticsRepository(
                         remark = item.remark,
                     )
                 }
+                OfflineOpType.RETURN, OfflineOpType.RELOCATION -> {
+                    if (item.materialId == null || item.expectedInventoryVersion == null) {
+                        dao.updateStatus(item.id, SyncStatus.FAILED.name, "缺少物料 ID 或库存版本，无法重放")
+                        return SyncOutcome.FAILED
+                    }
+                    val packed = try {
+                        JSONObject(item.remark ?: "{}")
+                    } catch (_: Exception) {
+                        dao.updateStatus(item.id, SyncStatus.FAILED.name, "队列数据损坏，无法重放")
+                        return SyncOutcome.FAILED
+                    }
+                    val isReturn = item.operationType == OfflineOpType.RETURN.name
+                    val source = packed.optStringOrNull("sourceLocation")
+                    if (!isReturn && source == null) {
+                        dao.updateStatus(item.id, SyncStatus.FAILED.name, "缺少来源库位，无法重放")
+                        return SyncOutcome.FAILED
+                    }
+                    api.createTransferRequest(
+                        clientOperationId = item.clientOperationId,
+                        type = if (isReturn) "RETURN" else "TRANSFER",
+                        documentNo = packed.optStringOrNull("documentNo"),
+                        items = listOf(TransferItem(materialId = item.materialId, quantity = item.quantity,
+                            sourceLocationCode = if (isReturn) null else source,
+                            targetLocationCode = item.targetLocation,
+                            expectedInventoryVersion = item.expectedInventoryVersion)),
+                        remark = packed.optStringOrNull("remark"),
+                    )
+                }
                 OfflineOpType.LOCATION_BIND -> api.bindLocation(item.materialCode, item.targetLocation ?: "", item.quantity)
                 OfflineOpType.EXCEPTION -> {
                     if (item.materialId == null) {
@@ -841,3 +968,7 @@ private fun OfflineOperationEntity.toDomain(): OfflineOperation = OfflineOperati
     serverTime = serverTime,
     errorMessage = errorMessage
 )
+
+/** JSONObject 可空字符串读取：缺失或 JSON null 返回 null（optString 会把 null 读成 "null"）。 */
+private fun JSONObject.optStringOrNull(key: String): String? =
+    if (!has(key) || isNull(key)) null else optString(key).takeIf { it.isNotBlank() }
