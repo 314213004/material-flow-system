@@ -640,6 +640,33 @@ class U9CClient(U9Client):
                                "complete_qty": r.get("totalcompleteqty")}
         return out
 
+    def fetch_recent_order_nos(self, limit: int = 2000,
+                               errors: list[dict] | None = None) -> list[str]:
+        """取最近 N 个生产订单号（按 MO_MO.ID 倒序）：只发固定的只读 SELECT。
+
+        组织编码先过白名单；返回去重后的单号列表（新→旧）。供按年份查找订单时
+        先圈定候选单号，再逐单读 MODoc 按开工年过滤。
+        """
+        org = self.cfg.org_code
+        if not _SAFE_KEY.match(org or ""):
+            raise U9Error(f"组织编码不合规，无法查询订单：{org!r}")
+        try:
+            n = max(1, min(int(limit), 5000))
+        except (TypeError, ValueError):
+            n = 2000
+        sql = (f"select top {n} m.DocNo as DocNo from MO_MO m"
+               f" join Base_Organization o on o.ID=m.Org"
+               f" where o.Code='{org}' order by m.ID desc")
+        out: list[str] = []
+        for row in self._post(PATH_SQL, {"SqlString": sql}):
+            if not isinstance(row, dict):
+                continue
+            r = {str(k).lower(): v for k, v in row.items()}
+            no = str(r.get("docno") or "").strip()
+            if no and no not in out:
+                out.append(no)
+        return out
+
 
 # 兼容旧名
 U9CloudClient = U9CClient

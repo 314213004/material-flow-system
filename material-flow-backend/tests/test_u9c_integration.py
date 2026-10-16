@@ -147,6 +147,10 @@ class FakeU9:
                         for r in self.inventory if codes is None or r["m_itemCode"] in codes]
                 return 200, json.dumps({"ResCode": 0, "Success": True, "Data": data},
                                        ensure_ascii=False).encode("utf-8")
+            if "from MO_MO m" in sql and "order by m.ID desc" in sql:
+                data = [{"DocNo": "MO001"}, {"DocNo": "MO002"}, {"DocNo": "MO003"}]
+                return 200, json.dumps({"ResCode": 0, "Success": True, "Data": data},
+                                       ensure_ascii=False).encode("utf-8")
             nos = re.findall(r"'([^']+)'", sql.split(" in (", 1)[1])
             data = [{"docno": n, "docstate": st, "productqty": 1.0, "totalcompleteqty": 1.0 if st == 3 else 0.0}
                     for n, st in self.mo_states.items() if n in nos]
@@ -388,6 +392,43 @@ def _patch_transport(monkeypatch, fake):
     def init(self, cfg, transport=None):
         orig(self, cfg, transport or fake)
     monkeypatch.setattr(u9client.U9Client, "__init__", init)
+
+
+# ------------------------------------------------------------------ 按年份查找订单
+def test_lookup_orders_by_year(fake, monkeypatch):
+    _patch_transport(monkeypatch, fake)
+    from app.u9.sync import lookup_orders_by_year
+    r = lookup_orders_by_year(make_cfg(), 2026)
+    assert r["year"] == 2026 and r["scanned"] == 3
+    # MO001 开工 2026-10-01 命中；MO002 无日期且单号不含年份，不命中；MO003 在 U9 不存在
+    assert r["matched"] == 1 and r["doc_nos"] == ["MO001"]
+    assert r["product_codes"] == ["SB01"]
+    assert r["sample"][0]["单号"] == "MO001"
+    assert not r["errors"]
+    # 换年份查不到
+    r = lookup_orders_by_year(make_cfg(), 2025)
+    assert r["matched"] == 0 and r["doc_nos"] == []
+    # 非法年份
+    with pytest.raises(U9Error):
+        lookup_orders_by_year(make_cfg(), 1999)
+
+
+def test_lookup_orders_route(db, fake, monkeypatch):
+    _patch_transport(monkeypatch, fake)
+    monkeypatch.setattr(u9config, "_config", make_cfg())
+    with TestClient(backend.app) as client:
+        ptok = _api_token(client, PLANNER[1], PLANNER[4])
+        assert client.get("/api/v1/u9/orders/lookup", params={"year": 2026},
+                          headers={"Authorization": f"Bearer {ptok}"}).status_code == 403
+        h = {"Authorization": f"Bearer {_api_token(client, ADMIN[1], ADMIN[4])}"}
+        r = client.get("/api/v1/u9/orders/lookup", params={"year": 2026}, headers=h)
+        assert r.status_code == 200
+        body = r.json()
+        assert body["matched"] == 1 and body["doc_nos"] == ["MO001"] \
+            and body["product_codes"] == ["SB01"]
+        assert client.get("/api/v1/u9/orders/lookup", headers=h).status_code == 422  # 缺 year
+        assert client.get("/api/v1/u9/orders/lookup", params={"year": 1999},
+                          headers=h).status_code == 502  # 年份非法
 
 
 def test_sync_items_dry_run_then_real(db, fake, monkeypatch):

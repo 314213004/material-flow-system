@@ -2,6 +2,7 @@
 
   GET  /api/v1/u9/status            配置状态（脱敏）+ 最近同步记录
   POST /api/v1/u9/health            测试连接（U9C 授权登录 + 耗时）
+  GET  /api/v1/u9/orders/lookup     按年份查生产订单号（只读，供 sync/orders 用）
   POST /api/v1/u9/sync/{entity}    触发同步，entity ∈ items/boms/inventory/orders
                                    dry_run=true（默认，仅预览不写库）
                                    items:     codes（可选，逗号分隔）+ include_local（默认 true=本地全部物料编码）
@@ -25,12 +26,12 @@ try:
     from app.main import ApiError, CODE_FORBIDDEN, current_user, db
     from app.u9.client import U9Error, get_client
     from app.u9.config import get_config
-    from app.u9.sync import ENTITIES, U9SyncBusy, run_sync
+    from app.u9.sync import ENTITIES, U9SyncBusy, lookup_orders_by_year, run_sync
 except ImportError:  # 直接以 app 目录为 cwd 运行时的兜底
     from main import ApiError, CODE_FORBIDDEN, current_user, db
     from u9.client import U9Error, get_client
     from u9.config import get_config
-    from u9.sync import ENTITIES, U9SyncBusy, run_sync
+    from u9.sync import ENTITIES, U9SyncBusy, lookup_orders_by_year, run_sync
 
 router = APIRouter()
 
@@ -134,6 +135,23 @@ def u9_sync(entity: str,
         raise ApiError(500, "U9_SYNC_FAILED", f"U9 同步异常：{e}")
     finally:
         c.close()
+
+
+@router.get("/api/v1/u9/orders/lookup")
+def u9_orders_lookup(year: int = Query(..., description="年份，如 2026"),
+                     limit: int = Query(default=2000, ge=1, le=5000,
+                                        description="从 U9 取最近 N 个单号再按年份过滤"),
+                     user: sqlite3.Row = Depends(current_user)):
+    """按年份查生产订单号（只读）：返回该年订单的 doc_nos 与产品料号，
+    可直接喂给 POST /api/v1/u9/sync/orders?doc_nos=… 与 sync/boms。"""
+    _admin(user)
+    cfg = _require_ready()
+    try:
+        return lookup_orders_by_year(cfg, year, limit)
+    except U9Error as e:
+        raise ApiError(502, "U9_UPSTREAM_ERROR", f"U9 查询失败：{e}")
+    except Exception as e:  # noqa: BLE001 - 转中文业务报错，不吞真因
+        raise ApiError(500, "U9_SYNC_FAILED", f"U9 查询异常：{e}")
 
 
 @router.get("/api/v1/u9/logs")
