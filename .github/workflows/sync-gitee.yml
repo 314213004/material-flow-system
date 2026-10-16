@@ -1,0 +1,25 @@
+name: 同步 main 到 Gitee 镜像
+
+# 221 等国内服务器的自更新脚本在 GitHub 下载失败时回退到 Gitee 镜像，
+# 镜像必须实时跟踪 main，否则新 commit 的 sha 在 Gitee 上不存在导致更新失败。
+on:
+  push:
+    branches: [main]
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      GITEE_TOKEN: <redacted>
+      GITEE_REPO: owlco001/material-flow-system
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 推送 main 到 Gitee
+        run: |
+          set -euo pipefail
+          git push "https://oauth2:${GITEE_TOKEN}@gitee.com/${GITEE_REPO}.git" \
+            "refs/heads/main:refs/heads/main"
+          echo "已同步 main 到 Gitee（$(git rev-parse --short HEAD)）"
