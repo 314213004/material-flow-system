@@ -269,18 +269,20 @@ fun ApprovalScreen(
                         onReject = { rejectRequest = request },
                         onExecute = { onExecute(request.id) },
                     )
+                    // 详情展开在「点开的那张卡片」下面，而不是整页最底部
+                    if (selectedRequestId == request.id) {
+                        VSpace(Spacing.sm)
+                        TransferRequestDetailCard(
+                            detail = detail,
+                            state = detailState,
+                            error = detailError,
+                            onClose = onCloseDetail,
+                            onRetry = onRetryDetail,
+                        )
+                        VSpace(Spacing.sm)
+                    }
                 }
             }
-        }
-
-        if (selectedRequestId != null) {
-            TransferRequestDetailCard(
-                detail = detail,
-                state = detailState,
-                error = detailError,
-                onClose = onCloseDetail,
-                onRetry = onRetryDetail,
-            )
         }
 
         VSpace(Spacing.lg)
