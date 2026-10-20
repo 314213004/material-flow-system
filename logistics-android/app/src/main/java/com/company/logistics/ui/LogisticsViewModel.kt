@@ -2770,7 +2770,13 @@ class LogisticsViewModel(
      * 机台详情页申请物料：OUTBOUND 流转申请，订单号写入 documentNo（机台详情按订单号筛申请），
      * 机台信息写入 remark（后端 Transfer 无机台字段）。走离线优先，断网进队列。
      */
-    fun submitDeviceMaterialRequest(material: com.company.logistics.model.OrderMaterialItem, orderNo: String, quantity: Int, remark: String) {
+    fun submitDeviceMaterialRequest(
+        material: com.company.logistics.model.OrderMaterialItem,
+        orderNo: String,
+        quantity: Int,
+        remark: String,
+        evidences: List<ByteArray> = emptyList(),
+    ) {
         if (_state.value.preview) {
             _state.update { it.copy(error = "测试预览只读，不能申请物料") }
             return
@@ -2787,17 +2793,39 @@ class LogisticsViewModel(
                 _state.update { it.copy(loading = false, error = "查不到该物料库存，无法申请") }
                 return@launch
             }
+            // 图片凭证：先上传拿 fileId，再随流转申请一起提交（离线入队时同样带上）。
+            val evidenceIds = uploadEvidences(evidences)
             val deviceNo = _state.value.deviceDetail?.deviceNo.orEmpty()
             val fullRemark = buildString {
                 if (deviceNo.isNotBlank()) append("机台：$deviceNo；")
                 if (remark.isNotBlank()) append(remark)
             }.ifBlank { null }
-            when (val r = repo.submitOutbound(material, inv, orderNo, quantity, fullRemark)) {
+            when (val r = repo.submitOutbound(material, inv, orderNo, quantity, fullRemark,
+                evidenceIds = evidenceIds)) {
                 is SubmitResult.Success -> _state.update { it.copy(loading = false, message = "物料申请已提交") }
                 is SubmitResult.Queued -> _state.update { it.copy(loading = false, message = "网络不可用，申请已入队：${r.reason}") }
                 is SubmitResult.Failure -> _state.update { it.copy(loading = false, error = r.message) }
             }
         }
+    }
+
+    /**
+     * 上传凭证照片，返回服务端 fileId 列表。
+     *
+     * 断网或单张上传失败时跳过该张并继续——凭证是辅助证据，不应阻断出入库业务；
+     * 全部失败时只留一条提示，避免用户以为单据没提交。
+     */
+    private suspend fun uploadEvidences(evidences: List<ByteArray>): List<String> {
+        if (evidences.isEmpty()) return emptyList()
+        val ids = mutableListOf<String>()
+        evidences.forEachIndexed { index, bytes ->
+            val result = repo.uploadEvidence(bytes, "evidence-${System.currentTimeMillis()}-$index.jpg")
+            result.getOrNull()?.let { ids += it }
+        }
+        if (ids.isEmpty()) {
+            _state.update { it.copy(error = "凭证上传失败（网络不可用？），本次单据未附带图片") }
+        }
+        return ids
     }
 
     /**

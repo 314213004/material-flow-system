@@ -387,8 +387,8 @@ fun LogisticsApp(
                         state.deviceTransferRequests,
                         state.deviceLabor,
                         onBack = { viewModel.navigate(Screen.SCANNER) },
-                        onSubmitMaterialRequest = { material, orderNo, qty, remark ->
-                            viewModel.submitDeviceMaterialRequest(material, orderNo, qty, remark)
+                        onSubmitMaterialRequest = { material, orderNo, qty, remark, evidences ->
+                            viewModel.submitDeviceMaterialRequest(material, orderNo, qty, remark, evidences)
                         },
                         onSubmitMaterialBatch = { b ->
                             viewModel.submitMaterialBatch(

@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import java.util.UUID
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -244,7 +245,8 @@ open class LogisticsRepository(
         bookQuantity: Int,
         actualQuantity: Int,
         description: String,
-        clientOperationId: String? = null
+        clientOperationId: String? = null,
+        evidenceIds: List<String> = emptyList()
     ): SubmitResult {
         val payload = JSONObject().apply {
             put("orderNo", orderNo)
@@ -252,6 +254,7 @@ open class LogisticsRepository(
             put("type", type)
             put("bookQuantity", bookQuantity)
             put("description", description)
+            put("evidenceIds", JSONArray(evidenceIds))
         }.toString()
         return submit(
             opType = OfflineOpType.EXCEPTION,
@@ -263,12 +266,17 @@ open class LogisticsRepository(
             remark = payload,
             clientOperationId = clientOperationId,
             remoteCall = { clientOpId ->
-                api.createException(clientOpId, orderNo, deviceId, materialId, type, bookQuantity, actualQuantity, description)
+                api.createException(clientOpId, orderNo, deviceId, materialId, type, bookQuantity,
+                    actualQuantity, description, evidenceIds)
             }
         )
     }
 
     /** Workshop assembly APIs use server-side timestamps and stable idempotency keys. */
+
+    /** 上传图片凭证（库位/异常/流转通用），返回服务端 fileId。 */
+    open suspend fun uploadEvidence(bytes: ByteArray, fileName: String, purpose: String = "TRANSFER"): Result<String> =
+        resultOf { api.uploadFile(bytes, fileName, purpose).fileId }
 
     /** 异常记录列表 */
     open suspend fun getExceptions(): Result<List<com.company.logistics.model.ExceptionRecord>> = resultOf {
@@ -527,7 +535,8 @@ open class LogisticsRepository(
         documentNo: String?,
         quantity: Int,
         remark: String?,
-        clientOperationId: String? = null
+        clientOperationId: String? = null,
+        evidenceIds: List<String> = emptyList()
     ): SubmitResult = submit(
         opType = OfflineOpType.OUTBOUND,
         materialCode = inventory.material.code,
@@ -537,7 +546,7 @@ open class LogisticsRepository(
         expectedInventoryVersion = inventory.version,
         // 队列实体没有 documentNo 字段：入队时打包进 remark JSON，重放时还原（见 [syncOne]）。
         // 不打包会让补传的单据丢失订单号，齐套与追溯统计漏计。
-        remark = packQueuedTransferRemark(documentNo, null, remark),
+        remark = packQueuedTransferRemark(documentNo, null, remark, evidenceIds),
         clientOperationId = clientOperationId,
         remoteCall = { clientOpId ->
             api.createTransferRequest(
@@ -551,7 +560,8 @@ open class LogisticsRepository(
                         expectedInventoryVersion = inventory.version
                     )
                 ),
-                remark = remark
+                remark = remark,
+                evidenceIds = evidenceIds,
             )
         }
     )
@@ -567,7 +577,8 @@ open class LogisticsRepository(
         quantity: Int,
         targetLocation: String?,
         remark: String?,
-        clientOperationId: String? = null
+        clientOperationId: String? = null,
+        evidenceIds: List<String> = emptyList()
     ): SubmitResult {
         val target = targetLocation?.takeIf { it.isNotBlank() } ?: inventory.primaryLocation
         return submit(
@@ -577,7 +588,7 @@ open class LogisticsRepository(
             quantity = quantity,
             targetLocation = target,
             expectedInventoryVersion = inventory.version,
-            remark = packQueuedTransferRemark(documentNo, null, remark),
+            remark = packQueuedTransferRemark(documentNo, null, remark, evidenceIds),
             clientOperationId = clientOperationId,
             remoteCall = { clientOpId ->
                 api.createTransferRequest(
@@ -592,7 +603,8 @@ open class LogisticsRepository(
                             expectedInventoryVersion = inventory.version
                         )
                     ),
-                    remark = remark
+                    remark = remark,
+                    evidenceIds = evidenceIds,
                 )
             }
         )
@@ -610,7 +622,8 @@ open class LogisticsRepository(
         sourceLocation: String,
         targetLocation: String,
         remark: String?,
-        clientOperationId: String? = null
+        clientOperationId: String? = null,
+        evidenceIds: List<String> = emptyList()
     ): SubmitResult {
         if (sourceLocation.isBlank() || targetLocation.isBlank()) {
             return SubmitResult.Failure("厂内调拨必须同时填写来源库位与目标库位", retryable = false)
@@ -625,7 +638,7 @@ open class LogisticsRepository(
             quantity = quantity,
             targetLocation = targetLocation,
             expectedInventoryVersion = inventory.version,
-            remark = packQueuedTransferRemark(documentNo, sourceLocation, remark),
+            remark = packQueuedTransferRemark(documentNo, sourceLocation, remark, evidenceIds),
             clientOperationId = clientOperationId,
             remoteCall = { clientOpId ->
                 api.createTransferRequest(
@@ -641,7 +654,8 @@ open class LogisticsRepository(
                             expectedInventoryVersion = inventory.version
                         )
                     ),
-                    remark = remark
+                    remark = remark,
+                    evidenceIds = evidenceIds,
                 )
             }
         )
@@ -653,12 +667,19 @@ open class LogisticsRepository(
      * 打包体带 `v` 版本标记：解包时以它区分"我方结构"与"用户恰好输入的合法 JSON"
      * （见 [unpackQueuedTransferRemark]）。字段语义（documentNo/sourceLocation/remark）不变。
      */
-    private fun packQueuedTransferRemark(documentNo: String?, sourceLocation: String?, remark: String?): String =
+    private fun packQueuedTransferRemark(
+        documentNo: String?,
+        sourceLocation: String?,
+        remark: String?,
+        evidenceIds: List<String> = emptyList(),
+    ): String =
         JSONObject().apply {
             put(QUEUED_REMARK_VERSION_KEY, QUEUED_REMARK_VERSION)
             put("documentNo", documentNo ?: JSONObject.NULL)
             put("sourceLocation", sourceLocation ?: JSONObject.NULL)
             put("remark", remark ?: JSONObject.NULL)
+            // 图片凭证：离线也随队列保存，联网重放时原样带上，避免"离线提交的单据没有凭证"。
+            put("evidenceIds", JSONArray(evidenceIds))
         }.toString()
 
     /**
@@ -695,7 +716,13 @@ open class LogisticsRepository(
     private fun JSONObject.toQueuedTransferRemark() = QueuedTransferRemark(
         documentNo = optStringOrNull("documentNo"),
         remark = optStringOrNull("remark"),
+        evidenceIds = optJSONArray("evidenceIds").toStringList(),
     )
+
+    private fun JSONArray?.toStringList(): List<String> {
+        if (this == null) return emptyList()
+        return (0 until length()).mapNotNull { index -> optString(index)?.takeIf { it.isNotBlank() } }
+    }
 
     /** 提交库位绑定（简化流程，无需审批） */
     suspend fun submitLocationBinding(
@@ -885,6 +912,7 @@ open class LogisticsRepository(
                             targetLocationCode = item.targetLocation,
                             expectedInventoryVersion = item.expectedInventoryVersion)),
                         remark = if (queued != null) queued.remark else item.remark,
+                        evidenceIds = queued?.evidenceIds ?: emptyList(),
                     )
                 }
                 OfflineOpType.RETURN, OfflineOpType.RELOCATION -> {
@@ -913,6 +941,7 @@ open class LogisticsRepository(
                             targetLocationCode = item.targetLocation,
                             expectedInventoryVersion = item.expectedInventoryVersion)),
                         remark = packed.optStringOrNull("remark"),
+                        evidenceIds = packed.optJSONArray("evidenceIds").toStringList(),
                     )
                 }
                 OfflineOpType.LOCATION_BIND -> api.bindLocation(item.materialCode, item.targetLocation ?: "", item.quantity)
@@ -936,6 +965,7 @@ open class LogisticsRepository(
                         bookQuantity = payload.optInt("bookQuantity", 0),
                         actualQuantity = item.quantity,
                         description = payload.optString("description", ""),
+                        evidenceIds = payload.optJSONArray("evidenceIds").toStringList(),
                     )
                 }
                 else -> {
@@ -1079,7 +1109,11 @@ private sealed interface QueuedRemarkParse {
 }
 
 /** 离线队列中打包的流转 remark：documentNo / sourceLocation / remark 三项，见 packQueuedTransferRemark。 */
-private data class QueuedTransferRemark(val documentNo: String?, val remark: String?)
+private data class QueuedTransferRemark(
+    val documentNo: String?,
+    val remark: String?,
+    val evidenceIds: List<String> = emptyList(),
+)
 
 /** 本地实体 → 领域模型 */
 private fun OfflineOperationEntity.toDomain(): OfflineOperation = OfflineOperation(

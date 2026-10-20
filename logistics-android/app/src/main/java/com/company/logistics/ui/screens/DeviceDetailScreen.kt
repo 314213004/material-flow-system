@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.company.logistics.ui.components.EvidencePicker
 import androidx.compose.ui.window.DialogProperties
 import com.company.logistics.Model3dActivity
 import com.company.logistics.model.AssemblyTask
@@ -90,7 +91,8 @@ fun DeviceDetailScreen(
     transferRequests: List<TransferRequest>,
     labor: LaborSummaryPage?,
     onBack: () -> Unit,
-    onSubmitMaterialRequest: (material: OrderMaterialItem, orderNo: String, quantity: Int, remark: String) -> Unit = { _, _, _, _ -> },
+    onSubmitMaterialRequest: (material: OrderMaterialItem, orderNo: String, quantity: Int, remark: String,
+                              evidences: List<ByteArray>) -> Unit = { _, _, _, _, _ -> },
     onSubmitMaterialBatch: (MaterialBatchSubmission) -> Unit = {},
     onSubmitException: (deviceId: String, materialId: String, materialCode: String, orderNo: String, type: String, bookQuantity: Int, actualQuantity: Int, description: String) -> Unit = { _, _, _, _, _, _, _, _ -> },
     role: UserRole = UserRole.OPERATOR,
@@ -699,8 +701,8 @@ fun DeviceDetailScreen(
             materials = materials,
             orders = detail.orders,
             onDismiss = { showMaterialRequestDialog = false },
-            onConfirm = { material, orderNo, qty, remark ->
-                onSubmitMaterialRequest(material, orderNo, qty, remark)
+            onConfirm = { material, orderNo, qty, remark, evidences ->
+                onSubmitMaterialRequest(material, orderNo, qty, remark, evidences)
                 showMaterialRequestDialog = false
             },
         )
@@ -805,7 +807,8 @@ private fun DeviceMaterialRequestDialog(
     materials: List<OrderMaterialItem>,
     orders: List<com.company.logistics.model.DeviceOrder>,
     onDismiss: () -> Unit,
-    onConfirm: (material: OrderMaterialItem, orderNo: String, quantity: Int, remark: String) -> Unit,
+    onConfirm: (material: OrderMaterialItem, orderNo: String, quantity: Int, remark: String,
+                evidences: List<ByteArray>) -> Unit,
 ) {
     var selectedMaterial by remember(materials) { mutableStateOf(materials.firstOrNull()) }
     var materialExpanded by remember { mutableStateOf(false) }
@@ -813,6 +816,7 @@ private fun DeviceMaterialRequestDialog(
     var orderExpanded by remember { mutableStateOf(false) }
     var qtyText by remember { mutableStateOf("") }
     var remark by remember { mutableStateOf("") }
+    var evidences by remember { mutableStateOf<List<ByteArray>>(emptyList()) }
     val canConfirm = selectedMaterial != null && selectedOrder.isNotBlank() && (qtyText.toIntOrNull() ?: 0) > 0
 
     AlertDialog(
@@ -876,13 +880,15 @@ private fun DeviceMaterialRequestDialog(
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
+                Spacer(Modifier.height(12.dp))
+                EvidencePicker(evidences = evidences, onChanged = { evidences = it })
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
                     val m = selectedMaterial
-                    if (m != null) onConfirm(m, selectedOrder, qtyText.toIntOrNull() ?: 0, remark)
+                    if (m != null) onConfirm(m, selectedOrder, qtyText.toIntOrNull() ?: 0, remark, evidences)
                 },
                 enabled = canConfirm,
             ) {

@@ -238,6 +238,7 @@ class LogisticsViewModelMaterialBatchTest {
             quantity: Int,
             remark: String?,
             clientOperationId: String?,
+            evidenceIds: List<String>,
         ): SubmitResult {
             outboundCalls += "${deviceMaterial.materialCode}:$quantity"
             remarks += remark
@@ -252,6 +253,7 @@ class LogisticsViewModelMaterialBatchTest {
             targetLocation: String?,
             remark: String?,
             clientOperationId: String?,
+            evidenceIds: List<String>,
         ): SubmitResult {
             returnCalls += "${deviceMaterial.materialCode}:$quantity:$targetLocation"
             return if (queueReturns) SubmitResult.Queued("op-1", "网络不可用") else SubmitResult.Success(null, null)
@@ -266,6 +268,7 @@ class LogisticsViewModelMaterialBatchTest {
             targetLocation: String,
             remark: String?,
             clientOperationId: String?,
+            evidenceIds: List<String>,
         ): SubmitResult {
             relocationCalls += "${deviceMaterial.materialCode}:$quantity:$sourceLocation->$targetLocation"
             return SubmitResult.Success(null, null)
@@ -281,6 +284,7 @@ class LogisticsViewModelMaterialBatchTest {
             actualQuantity: Int,
             description: String,
             clientOperationId: String?,
+            evidenceIds: List<String>,
         ): SubmitResult {
             exceptionCalls += "$materialCode:$deviceId:$type:$bookQuantity->$actualQuantity"
             return SubmitResult.Success(null, null)

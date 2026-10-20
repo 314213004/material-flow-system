@@ -2,4 +2,6 @@
 <paths>
     <!-- APK 更新包下载目录 -->
     <external-path name="downloads" path="Download/" />
+    <!-- 图片凭证：拍照临时文件写入 cache/evidence -->
+    <cache-path name="evidence" path="evidence/" />
 </paths>
