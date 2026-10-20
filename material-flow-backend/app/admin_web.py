@@ -538,6 +538,25 @@ def _render_users(request: Request, user: sqlite3.Row, error: str | None = None)
     )
 
 
+
+def _save_user_workshop(user_id: str, workshop: str) -> None:
+    """0.21.6：保存车间主管的车间归属。空值 = 全厂（删除记录）。"""
+    c = db()
+    try:
+        if workshop:
+            c.execute(
+                "INSERT INTO user_workshops(user_id, workshop, updated_at) VALUES(?,?,?)"
+                " ON CONFLICT(user_id) DO UPDATE SET workshop=excluded.workshop,"
+                " updated_at=excluded.updated_at",
+                (user_id, workshop, now()),
+            )
+        else:
+            c.execute("DELETE FROM user_workshops WHERE user_id=?", (user_id,))
+        c.commit()
+    finally:
+        c.close()
+
+
 def _render_user_form(
     request: Request,
     user: sqlite3.Row,
@@ -627,6 +646,7 @@ def admin_user_edit_form(request: Request, user_id: str):
         target = c.execute(
             "SELECT id, username, display_name, role, active FROM users WHERE id=?", (user_id,)
         ).fetchone()
+        ws_row = c.execute("SELECT workshop FROM user_workshops WHERE user_id=?", (user_id,)).fetchone()
     finally:
         c.close()
     if target is None:
@@ -641,6 +661,7 @@ def admin_user_edit_form(request: Request, user_id: str):
             "displayName": target["display_name"],
             "role": target["role"] if target["role"] in EDIT_ROLES else EDIT_ROLES[0],
             "active": bool(target["active"]),
+            "workshop": (ws_row["workshop"] if ws_row else ""),
         },
     )
 
@@ -659,6 +680,7 @@ async def admin_user_edit(request: Request, user_id: str):
         "displayName": str(form.get("displayName", "")).strip(),
         "role": str(form.get("role", "")),
         "active": form.get("active") == "on",
+        "workshop": str(form.get("workshop", "")).strip(),
     }
     try:
         edit_employee(
@@ -683,6 +705,7 @@ async def admin_user_edit(request: Request, user_id: str):
             values=values,
             error=_api_error_message(exc),
         )
+    _save_user_workshop(user_id, values["workshop"])
     return _see_other("/admin/users?notice=updated")
 
 

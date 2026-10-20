@@ -8,6 +8,8 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -41,7 +43,11 @@ data class OfflineOperationEntity(
     /** 服务端时间戳（同步成功后回填） */
     val serverTime: String? = null,
     /** 失败原因，供用户判断是否重试 */
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    /** 已自动重试次数（达到上限后转 FAILED，等人工处理） */
+    val retryCount: Int = 0,
+    /** 下次允许自动重试的时间戳（毫秒）；null=立即 */
+    val nextRetryAt: Long? = null
 )
 
 @Dao
@@ -49,7 +55,14 @@ interface OfflineOperationDao {
     @Query("SELECT * FROM offline_operations ORDER BY createdAt DESC")
     fun observeAll(): Flow<List<OfflineOperationEntity>>
 
-    @Query("SELECT * FROM offline_operations WHERE status IN ('PENDING','FAILED') ORDER BY createdAt ASC LIMIT 20")
+    /**
+     * 待重放队列：只取 PENDING。
+     *
+     * FAILED 是终态（自动重试已用尽或数据损坏），必须由用户在「待处理」里手动重试/放弃，
+     * 否则每次同步都会把同一批坏记录再打一遍服务端（旧实现就是 PENDING+FAILED 一起查）。
+     * nextRetryAt 的到期判断放在 Repository 里做，保持 DAO 签名稳定。
+     */
+    @Query("SELECT * FROM offline_operations WHERE status = 'PENDING' ORDER BY createdAt ASC LIMIT 20")
     suspend fun pending(): List<OfflineOperationEntity>
 
     @Query("SELECT COUNT(*) FROM offline_operations WHERE status IN ('PENDING','FAILED','SYNCING')")
@@ -64,6 +77,13 @@ interface OfflineOperationDao {
 
     @Query("UPDATE offline_operations SET status = :status, errorMessage = :error WHERE id = :id")
     suspend fun updateStatus(id: String, status: String, error: String? = null)
+
+    /** 自动重试调度：写入重试计数与下次重试时间（status 传 PENDING 或 FAILED）。 */
+    @Query("UPDATE offline_operations SET status = :status, errorMessage = :error, " +
+           "retryCount = :retryCount, nextRetryAt = :nextRetryAt WHERE id = :id")
+    suspend fun scheduleRetry(id: String, status: String, error: String?, retryCount: Int, nextRetryAt: Long?) {
+        // 仅测试替身会命中默认实现；Room 会为 @Query 生成真正实现。
+    }
 
     @Query("UPDATE offline_operations SET status = :status, serverTime = :serverTime, errorMessage = NULL WHERE id = :id")
     suspend fun markSynced(id: String, status: String, serverTime: String?)
@@ -90,7 +110,17 @@ interface OfflineOperationDao {
     suspend fun deleteById(id: String)
 }
 
-@Database(entities = [OfflineOperationEntity::class], version = 2, exportSchema = false)
+@Database(entities = [OfflineOperationEntity::class], version = 3, exportSchema = false)
 abstract class LogisticsDatabase : RoomDatabase() {
     abstract fun offlineOperationDao(): OfflineOperationDao
+
+    companion object {
+        /** 2 → 3：离线队列增加自动重试计数与下次重试时间（0.5.45）。 */
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE offline_operations ADD COLUMN retryCount INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE offline_operations ADD COLUMN nextRetryAt INTEGER")
+            }
+        }
+    }
 }

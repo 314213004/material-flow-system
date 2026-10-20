@@ -11,6 +11,7 @@ object DatabaseProvider {
             context.applicationContext,
             LogisticsDatabase::class.java,
             "logistics.db"
-        ).build().also { instance = it }
+        ).addMigrations(LogisticsDatabase.MIGRATION_2_3)
+            .build().also { instance = it }
     }
 }

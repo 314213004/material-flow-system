@@ -37,6 +37,8 @@
     </select>
     {% endif %}
     {% if mode == "edit" %}
+    <label>所属车间（仅车间主管生效；留空=全厂）</label>
+    <input name="workshop" value="{{ values.workshop or '' }}" maxlength="64" placeholder="如 一车间">
     <label style="margin-top:12px">
       <input type="checkbox" name="active" style="width:auto" {% if values.active %}checked{% endif %}> 在职
     </label>

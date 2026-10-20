@@ -756,6 +756,9 @@ def _init_db(c: sqlite3.Connection) -> None:
     BEGIN IMMEDIATE;
     CREATE TABLE IF NOT EXISTS users(id TEXT PRIMARY KEY, username TEXT UNIQUE NOT NULL, display_name TEXT NOT NULL, role TEXT NOT NULL, password_hash TEXT NOT NULL, must_change_password INTEGER NOT NULL DEFAULT 1, active INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS employee_managers(employee_id TEXT PRIMARY KEY REFERENCES users(id), manager_id TEXT NOT NULL REFERENCES users(id));
+    -- 0.21.6：车间主管的授权范围。单独建表而不是给 users 加列（users 有按位置插入的历史写法，
+    -- 加列会连带改迁移和大量既有 SQL）。没有记录 = 全厂，与升级前行为一致。
+    CREATE TABLE IF NOT EXISTS user_workshops(user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE, workshop TEXT NOT NULL, updated_at TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY, user_id TEXT NOT NULL, expires_at INTEGER NOT NULL, token_type TEXT NOT NULL DEFAULT 'ACCESS', device_id TEXT);
     -- 已消费的刷新令牌墓碑表：用于检测令牌重放。
     -- 若直接删除旧令牌，"令牌不存在" 与 "令牌被重放" 无法区分，
@@ -3774,23 +3777,62 @@ def list_assembly_tasks(
         c.close()
 
 
+# 统计口径的机台解析与车间收敛（0.21.6）。
+# assembly_tasks.device_id 在不同导入路径下分别指向 devices(id)（U9 项目导入、本地建单）
+# 与 order_devices(id)（报价导入），故先用 device_id 命中 devices，命中不到再按机台号回退，
+# 避免统计漏台；车间收敛一律看 devices.workshop。
+_DEVICE_JOIN = (
+    " LEFT JOIN devices d ON d.id = COALESCE("
+    "  (SELECT d1.id FROM devices d1 WHERE d1.id = t.device_id),"
+    "  (SELECT d2.id FROM devices d2 WHERE d2.device_no = t.device_no))"
+)
+
+
+def _user_workshop(c: sqlite3.Connection, user: sqlite3.Row) -> str | None:
+    """车间主管的车间归属（user_workshops）；未配置或非主管返回 None（= 不收敛）。"""
+    if user["role"] != "WORKSHOP_SUPERVISOR":
+        return None
+    row = c.execute("SELECT workshop FROM user_workshops WHERE user_id=?", (user["id"],)).fetchone()
+    workshop = (row["workshop"] or "").strip() if row else ""
+    return workshop or None
+
+
+def _workshop_task_scope(workshop: str | None) -> tuple[str, list[Any]]:
+    """给带 ``t`` 别名的 assembly_tasks 查询追加车间条件（配合 _DEVICE_JOIN）。"""
+    return (" AND d.workshop=?", [workshop]) if workshop else ("", [])
+
+
 @app.get("/api/v1/workshop/summary")
 def workshop_summary(
     user: sqlite3.Row = Depends(current_user),
 ) -> dict[str, Any]:
-    """车间进度汇总（车间主管工作台用）。"""
+    """车间进度汇总（车间主管工作台用）。
+
+    0.21.6：车间主管配置了车间归属（user_workshops）后只统计本车间机台；
+    未配置 = 全厂，与升级前一致（不会把老主管的看板清空）。
+    """
     if user["role"] not in {"ADMIN", "WORKSHOP_SUPERVISOR", "PLANNER"}:
         raise ApiError(403, CODE_FORBIDDEN, "无权查看车间汇总")
     c = db()
     try:
-        total = c.execute("SELECT COUNT(*) AS n FROM assembly_tasks").fetchone()["n"]
-        completed = c.execute("SELECT COUNT(*) AS n FROM assembly_tasks WHERE status='COMPLETED'").fetchone()["n"]
+        workshop = _user_workshop(c, user)
+        scope, scope_args = _workshop_task_scope(workshop)
+        total = c.execute(
+            f"SELECT COUNT(*) AS n FROM assembly_tasks t{_DEVICE_JOIN} WHERE 1=1{scope}", scope_args
+        ).fetchone()["n"]
+        completed = c.execute(
+            f"SELECT COUNT(*) AS n FROM assembly_tasks t{_DEVICE_JOIN}"
+            f" WHERE t.status='COMPLETED'{scope}", scope_args
+        ).fetchone()["n"]
         overall = round(completed * 100 / total) if total else 0
         labor = c.execute(
-            "SELECT COALESCE(SUM(CASE WHEN status='COMPLETED' THEN duration_minutes ELSE 0 END),0) AS m, "
-            "COALESCE(SUM(CASE WHEN status='COMPLETED' AND type='ASSEMBLY' THEN duration_minutes ELSE 0 END),0) AS a, "
-            "COALESCE(SUM(CASE WHEN status='COMPLETED' AND type='TEMPORARY_TRANSFER' THEN duration_minutes ELSE 0 END),0) AS t "
-            "FROM labor_records"
+            "SELECT COALESCE(SUM(CASE WHEN l.status='COMPLETED' THEN l.duration_minutes ELSE 0 END),0) AS m, "
+            "COALESCE(SUM(CASE WHEN l.status='COMPLETED' AND l.type='ASSEMBLY' THEN l.duration_minutes ELSE 0 END),0) AS a, "
+            "COALESCE(SUM(CASE WHEN l.status='COMPLETED' AND l.type='TEMPORARY_TRANSFER' THEN l.duration_minutes ELSE 0 END),0) AS t "
+            "FROM labor_records l"
+            + (f" JOIN assembly_tasks t ON t.id=l.task_id{_DEVICE_JOIN} WHERE 1=1{scope}"
+               if scope else ""),
+            scope_args,
         ).fetchone()
         machines = c.execute(
             "SELECT t.device_id AS device_id, t.device_no AS device_no, "
@@ -3799,9 +3841,16 @@ def workshop_summary(
             "COALESCE((SELECT SUM(CASE WHEN lr.status='COMPLETED' THEN lr.duration_minutes ELSE 0 END) "
             "FROM labor_records lr WHERE lr.task_id IN "
             "(SELECT id FROM assembly_tasks t2 WHERE t2.device_id=t.device_id)),0) AS labor_minutes "
-            "FROM assembly_tasks t GROUP BY t.device_id, t.device_no ORDER BY t.device_no"
+            f"FROM assembly_tasks t{_DEVICE_JOIN} WHERE 1=1{scope} "
+            "GROUP BY t.device_id, t.device_no ORDER BY t.device_no",
+            scope_args,
         ).fetchall()
-        # ---- 订单物料汇总 ----
+        # ---- 订单物料汇总（按车间收敛时只算本车间有任务的订单）----
+        order_scope, order_args = "", []
+        if workshop:
+            order_scope = (" WHERE o.order_no IN (SELECT t.order_no FROM assembly_tasks t"
+                           f"{_DEVICE_JOIN} WHERE d.workshop=?)")
+            order_args = [workshop]
         order_materials = c.execute(
             "SELECT o.order_no AS order_no, o.product_name AS product_name, o.status AS order_status, "
             "COUNT(r.id) AS material_kinds, "
@@ -3811,8 +3860,10 @@ def workshop_summary(
             "SUM(CASE WHEN r.status_code='OUT_OF_STOCK' THEN 1 ELSE 0 END) AS out_of_stock_kinds "
             "FROM production_orders o "
             "LEFT JOIN order_material_requirements r ON r.order_id=o.id "
-            "GROUP BY o.id, o.order_no, o.product_name, o.status "
-            "ORDER BY o.order_no"
+            + order_scope +
+            " GROUP BY o.id, o.order_no, o.product_name, o.status "
+            "ORDER BY o.order_no",
+            order_args,
         ).fetchall()
         order_material_summary = []
         for om in order_materials:
@@ -3838,7 +3889,9 @@ def workshop_summary(
             "SUM(CASE WHEN t.status='REJECTED' THEN 1 ELSE 0 END) AS rejected "
             "FROM production_orders o "
             "LEFT JOIN transfer_requests t ON t.document_no=o.order_no "
-            "GROUP BY o.id, o.order_no ORDER BY o.order_no"
+            + order_scope +
+            " GROUP BY o.id, o.order_no ORDER BY o.order_no",
+            order_args,
         ).fetchall()
         order_transfer_summary = []
         for ot in order_transfers:
@@ -3858,9 +3911,10 @@ def workshop_summary(
             "SUM(CASE WHEN t.status='COMPLETED' THEN 1 ELSE 0 END) AS completed_count, "
             "SUM(CASE WHEN t.status='IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_count, "
             "SUM(CASE WHEN t.status='WAITING_MATERIAL' THEN 1 ELSE 0 END) AS waiting_count "
-            "FROM assembly_tasks t "
+            f"FROM assembly_tasks t{_DEVICE_JOIN} WHERE 1=1{scope} "
             "GROUP BY t.device_id, t.device_no, t.order_no "
-            "ORDER BY t.device_no, t.order_no"
+            "ORDER BY t.device_no, t.order_no",
+            scope_args,
         ).fetchall()
         machine_order_progress = []
         for mo in mo_rows:
@@ -3887,7 +3941,9 @@ def workshop_summary(
             })
         ts = now()
         return {
-            "workshopId": None, "totalTasks": total, "completedTasks": completed,
+            "workshopId": workshop, "workshop": workshop,
+            "scope": "WORKSHOP" if workshop else "ALL",
+            "totalTasks": total, "completedTasks": completed,
             "overallProgressPercent": overall,
             "totalLaborMinutes": labor["m"], "assemblyLaborMinutes": labor["a"],
             "temporaryTransferLaborMinutes": labor["t"],
@@ -3912,13 +3968,14 @@ def workshop_machine_progress(
     _machine_progress_authorized(user)
     c = db()
     try:
-        where, args = _machine_progress_where(deviceId)
+        workshop = _user_workshop(c, user)
+        where, args = _machine_progress_where(deviceId, workshop)
         total = c.execute(
-            f"SELECT COUNT(DISTINCT t.device_id) AS n FROM assembly_tasks t WHERE {where}", args
+            f"SELECT COUNT(DISTINCT t.device_id) AS n FROM assembly_tasks t{_DEVICE_JOIN} WHERE {where}", args
         ).fetchone()["n"]
         total_pages = (total + pageSize - 1) // pageSize if total else 0
         offset = (page - 1) * pageSize
-        items = _machine_progress_items(c, deviceId, pageSize, offset)
+        items = _machine_progress_items(c, deviceId, workshop, pageSize, offset)
         ts = now()
         return {
             "items": items, "page": page, "pageSize": pageSize,
@@ -3934,17 +3991,24 @@ def _machine_progress_authorized(user: sqlite3.Row) -> None:
         raise ApiError(403, CODE_FORBIDDEN, "无权查看机台进度")
 
 
-def _machine_progress_where(device_id: str | None) -> tuple[str, list[Any]]:
+def _machine_progress_where(device_id: str | None, workshop: str | None = None) -> tuple[str, list[Any]]:
+    """机台进度过滤：deviceId 精确匹配 + 车间收敛（0.21.6）。"""
+    clauses: list[str] = []
+    args: list[Any] = []
     if device_id:
-        return "t.device_id = ?", [device_id]
-    return "1=1", []
+        clauses.append("t.device_id = ?")
+        args.append(device_id)
+    if workshop:
+        clauses.append("d.workshop = ?")
+        args.append(workshop)
+    return (" AND ".join(clauses) or "1=1"), args
 
 
 def _machine_progress_items(
-    c: sqlite3.Connection, device_id: str | None,
+    c: sqlite3.Connection, device_id: str | None, workshop: str | None = None,
     limit: int | None = None, offset: int = 0,
 ) -> list[dict[str, Any]]:
-    where, args = _machine_progress_where(device_id)
+    where, args = _machine_progress_where(device_id, workshop)
     paging = ""
     if limit is not None:
         paging = " LIMIT ? OFFSET ?"
@@ -3956,7 +4020,7 @@ def _machine_progress_items(
         "COALESCE((SELECT SUM(CASE WHEN lr.status='COMPLETED' THEN lr.duration_minutes ELSE 0 END) "
         "FROM labor_records lr WHERE lr.task_id IN "
         "(SELECT id FROM assembly_tasks t2 WHERE t2.device_id=t.device_id)),0) AS labor_minutes "
-        f"FROM assembly_tasks t WHERE {where} "
+        f"FROM assembly_tasks t{_DEVICE_JOIN} WHERE {where} "
         f"GROUP BY t.device_id, t.device_no ORDER BY t.device_no{paging}",
         args,
     ).fetchall()
@@ -3978,7 +4042,58 @@ def machine_progress_export_items(user: sqlite3.Row, device_id: str | None = Non
     _machine_progress_authorized(user)
     c = db()
     try:
-        return _machine_progress_items(c, device_id)
+        return _machine_progress_items(c, device_id, _user_workshop(c, user))
+    finally:
+        c.close()
+
+
+@app.get("/api/v1/workshop/order-progress")
+def workshop_order_progress(
+    orderNo: str | None = Query(default=None, max_length=64),
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=50, ge=1, le=200),
+    user: sqlite3.Row = Depends(current_user),
+) -> dict[str, Any]:
+    """订单维度进度（0.21.6）。
+
+    一台机台按阶段 0..3 计，完工算满；订单进度取该订单机台的平均。
+    修掉「拿全厂 overallProgressPercent 冒充订单总进度」的口径问题。
+    """
+    _machine_progress_authorized(user)
+    c = db()
+    try:
+        workshop = _user_workshop(c, user)
+        scope, scope_args = _workshop_task_scope(workshop)
+        where, args = f"WHERE 1=1{scope}", list(scope_args)
+        if orderNo:
+            where += " AND t.order_no=?"
+            args.append(orderNo)
+        rows = c.execute(
+            "SELECT t.order_no AS order_no, COUNT(*) AS total_tasks, "
+            "SUM(CASE WHEN t.status='COMPLETED' THEN 1 ELSE 0 END) AS completed_tasks, "
+            "SUM(CASE WHEN t.status='WAITING_MATERIAL' THEN 1 ELSE 0 END) AS waiting_tasks, "
+            "SUM(CASE WHEN t.status IN ('IN_PROGRESS','MATERIAL_ACCEPTED',"
+            "'PAUSED_FOR_TEMPORARY_TRANSFER') THEN 1 ELSE 0 END) AS in_progress_tasks, "
+            "ROUND(SUM(CASE WHEN t.status='COMPLETED' THEN 3 ELSE t.progress_stage END)"
+            "*100.0/(COUNT(*)*3)) AS progress "
+            f"FROM assembly_tasks t{_DEVICE_JOIN} {where} "
+            "GROUP BY t.order_no ORDER BY t.order_no LIMIT ? OFFSET ?",
+            args + [pageSize, (page - 1) * pageSize],
+        ).fetchall()
+        ts = now()
+        return {
+            "items": [{
+                "orderNo": r["order_no"],
+                "totalTasks": r["total_tasks"] or 0,
+                "completedTasks": r["completed_tasks"] or 0,
+                "waitingMaterialTasks": r["waiting_tasks"] or 0,
+                "inProgressTasks": r["in_progress_tasks"] or 0,
+                "orderProgressPercent": r["progress"] or 0,
+            } for r in rows],
+            "page": page, "pageSize": pageSize,
+            "workshop": workshop, "scope": "WORKSHOP" if workshop else "ALL",
+            "serverTime": ts, "generatedAt": ts,
+        }
     finally:
         c.close()
 
@@ -4290,6 +4405,20 @@ def order_detail(
         labor_args,
     ).fetchall()
     labor_totals = {r["type"]: int(r["minutes"] or 0) for r in labor}
+    # 订单维度进度（0.21.6）：机台阶段 0..3，完工算满；按可见任务聚合，
+    # 不用全厂 overallProgressPercent 冒充订单进度。必须在 c.close() 之前取。
+    progress_row = c.execute(
+        f"""SELECT count(*) AS n, sum(t.status='COMPLETED') AS done,
+                   coalesce(sum(CASE WHEN t.status='COMPLETED' THEN 3 ELSE t.progress_stage END),0) AS stages,
+                   sum(CASE WHEN t.status='WAITING_MATERIAL' THEN 1 ELSE 0 END) AS waiting,
+                   sum(CASE WHEN t.status IN ('IN_PROGRESS','MATERIAL_ACCEPTED',
+                                              'PAUSED_FOR_TEMPORARY_TRANSFER') THEN 1 ELSE 0 END) AS doing
+              FROM assembly_tasks t WHERE {task_where}""",
+        task_args,
+    ).fetchone()
+    progress_tasks = progress_row["n"] or 0
+    order_progress = (round((progress_row["stages"] or 0) * 100 / (progress_tasks * 3))
+                      if progress_tasks else 0)
 
     # Only event types already written by the handover/transfer/assembly paths
     # are projected; raw before/after payloads and network metadata stay private.
@@ -4349,6 +4478,13 @@ def order_detail(
         "productName": order["product_name"], "orderStatus": order["status"],
         "materials": materials,
         "materialSummary": _material_summary(scoped),
+        "progress": {
+            "totalTasks": progress_tasks,
+            "completedTasks": progress_row["done"] or 0,
+            "waitingMaterialTasks": progress_row["waiting"] or 0,
+            "inProgressTasks": progress_row["doing"] or 0,
+            "orderProgressPercent": order_progress,
+        },
         "assemblyTasks": [{
             "taskId": r["id"], "deviceId": r["device_id"], "deviceNo": r["device_no"],
             "deviceName": r["device_name"],

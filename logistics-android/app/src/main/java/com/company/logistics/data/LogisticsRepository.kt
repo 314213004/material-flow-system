@@ -813,13 +813,42 @@ open class LogisticsRepository(
      * 冲突（409）标记 CONFLICT，交由用户决定。
      */
     suspend fun syncPending(): SyncReport = coroutineScope {
-        val pending = dao.pending()
+        // 只重放 PENDING 且已到下次重试时间的记录：FAILED 是终态（等用户手动处理），
+        // 退避未到期的记录这一轮跳过，避免断网时每次进前台都去撞同一批请求。
+        val nowMillis = System.currentTimeMillis()
+        val pending = dao.pending().filter { it.nextRetryAt == null || it.nextRetryAt <= nowMillis }
         val permits = kotlinx.coroutines.sync.Semaphore(MAX_CONCURRENT_OPERATIONS)
         val outcomes = pending.map { item -> async(Dispatchers.IO) {
             permits.acquire()
             try { syncOne(item) } finally { permits.release() }
         } }.awaitAll()
-        SyncReport(outcomes.count { it == SyncOutcome.SUCCESS }, outcomes.count { it == SyncOutcome.FAILED }, outcomes.count { it == SyncOutcome.CONFLICT })
+        SyncReport(
+            success = outcomes.count { it == SyncOutcome.SUCCESS },
+            failed = outcomes.count { it == SyncOutcome.FAILED },
+            conflict = outcomes.count { it == SyncOutcome.CONFLICT },
+            retrying = outcomes.count { it == SyncOutcome.RETRY_SCHEDULED },
+        )
+    }
+
+    /**
+     * 自动重试：第 N 次失败后按 30s/60s/2min/4min 退避，累计 [MAX_AUTO_RETRY] 次仍失败转 FAILED，
+     * 交给用户在「待处理」里决定重试或放弃——不再像旧实现那样把 FAILED 也塞进每轮重放。
+     */
+    private suspend fun scheduleRetry(item: OfflineOperationEntity, reason: String): SyncOutcome {
+        val attempt = item.retryCount + 1
+        if (attempt >= MAX_AUTO_RETRY) {
+            dao.updateStatus(item.id, SyncStatus.FAILED.name, "已自动重试 $attempt 次仍失败：$reason")
+            return SyncOutcome.FAILED
+        }
+        val delay = retryDelayMillis(attempt)
+        dao.scheduleRetry(
+            id = item.id,
+            status = SyncStatus.PENDING.name,
+            error = "第 $attempt 次失败，将在 ${delay / 60_000} 分钟后自动重试：$reason",
+            retryCount = attempt,
+            nextRetryAt = System.currentTimeMillis() + delay,
+        )
+        return SyncOutcome.RETRY_SCHEDULED
     }
 
     private suspend fun syncOne(item: OfflineOperationEntity): SyncOutcome {
@@ -917,14 +946,16 @@ open class LogisticsRepository(
             dao.markSynced(item.id, SyncStatus.SYNCED.name, null)
             return SyncOutcome.SUCCESS
         } catch (e: ApiException) {
-            val status = if (e.isConflict) SyncStatus.CONFLICT else SyncStatus.FAILED
-            dao.updateStatus(item.id, status.name, e.safeMessage("同步失败，请重试"))
-            return if (e.isConflict) SyncOutcome.CONFLICT else SyncOutcome.FAILED
+            if (e.isConflict) {
+                // 409：幂等键/库存版本冲突，重试也不会变，必须人工处理
+                dao.updateStatus(item.id, SyncStatus.CONFLICT.name, e.safeMessage("同步冲突，请人工处理"))
+                return SyncOutcome.CONFLICT
+            }
+            return scheduleRetry(item, e.safeMessage("同步失败，请重试"))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (e: Exception) {
-            dao.updateStatus(item.id, SyncStatus.FAILED.name, "网络不可用，请重试")
-            return SyncOutcome.FAILED
+            return scheduleRetry(item, "网络不可用，请重试")
         }
     }
 
@@ -1010,15 +1041,30 @@ sealed interface SubmitResult {
 }
 
 /** 同步结果报告 */
-data class SyncReport(val success: Int, val failed: Int, val conflict: Int) {
+data class SyncReport(
+    val success: Int,
+    val failed: Int,
+    val conflict: Int,
+    /** 本轮失败但已排入自动重试的记录数（不算终态失败） */
+    val retrying: Int = 0,
+) {
     val hasIssue: Boolean get() = failed > 0 || conflict > 0
 }
 
-private enum class SyncOutcome { SUCCESS, FAILED, CONFLICT }
+/** 自动重试间隔：30s、1min、2min、4min（最多 [MAX_AUTO_RETRY] 次）。 */
+private fun retryDelayMillis(attempt: Int): Long {
+    val shift = (attempt - 1).coerceIn(0, 5)
+    return minOf(30L * 60_000L, 30_000L shl shift)
+}
+
+private enum class SyncOutcome { SUCCESS, FAILED, CONFLICT, RETRY_SCHEDULED }
 
 /** 打包体版本标记：区分"我方写的结构"与"用户恰好输入的合法 JSON"。 */
 private const val QUEUED_REMARK_VERSION_KEY = "v"
 private const val QUEUED_REMARK_VERSION = 1
+
+/** 同一操作自动重试的次数上限，超过后转 FAILED 等人工处理。 */
+private const val MAX_AUTO_RETRY = 5
 
 /**
  * 离线队列 remark 解包结果：

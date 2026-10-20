@@ -326,7 +326,7 @@ class OfflineOutboundDocumentNoTest {
 
         override fun observeAll(): Flow<List<OfflineOperationEntity>> = state
         override suspend fun pending() = state.value
-            .filter { it.status == SyncStatus.PENDING.name || it.status == SyncStatus.FAILED.name }
+            .filter { it.status == SyncStatus.PENDING.name }
             .sortedBy { it.createdAt }
             .take(20)
         override fun observePendingCount() = flowOf(state.value.count {
