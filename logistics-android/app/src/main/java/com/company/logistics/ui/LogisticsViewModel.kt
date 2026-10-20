@@ -80,7 +80,8 @@ enum class Screen(val title: String) {
     DEVICE_DETAIL("机台详情"),
     FLOW_DETAIL("流转单详情"),
     FLOW_HANDOVER("扫码交接"),
-    MY_EXCEPTIONS("我的异常")
+    MY_EXCEPTIONS("我的异常"),
+    STOCKTAKE("盘点")
 }
 
 /**
@@ -247,6 +248,11 @@ data class LogisticsUiState(
     val myExceptions: List<ExceptionRecord> = emptyList(),
     val myExceptionsState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
     val myExceptionsError: String? = null,
+    /** 盘点列表与提交状态（0.5.45） */
+    val stocktakes: List<com.company.logistics.model.StocktakeRecord> = emptyList(),
+    val stocktakeState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
+    val stocktakeError: String? = null,
+    val stocktakeSubmitting: Boolean = false,
     val auditPage: Int = 1,
     val auditPageSize: Int = AUDIT_PAGE_SIZE,
     val auditHasNext: Boolean = false,
@@ -614,6 +620,7 @@ class LogisticsViewModel(
             Screen.APPROVAL -> refreshTransferRequests()
             Screen.AUDIT -> refreshAuditLogs()
             Screen.MY_EXCEPTIONS -> refreshMyExceptions()
+            Screen.STOCKTAKE -> refreshStocktakes()
             Screen.ORDER_DETAIL -> loadRecentOrders()
             Screen.PROFILE -> loadMyTransferRequests()
             else -> Unit
@@ -1961,6 +1968,81 @@ class LogisticsViewModel(
         }
     }
 
+    /** 盘点列表（0.5.45）：物料员/仓管/管理员可见。 */
+    fun refreshStocktakes() {
+        if (!_state.value.loggedIn) return
+        operationScope.launch {
+            _state.update { it.copy(stocktakeState = WorkspaceLoadState.LOADING, stocktakeError = null) }
+            repo.stocktakes()
+                .onSuccess { list ->
+                    _state.update {
+                        it.copy(
+                            stocktakes = list,
+                            stocktakeState = if (list.isEmpty()) WorkspaceLoadState.EMPTY else WorkspaceLoadState.CONTENT,
+                            stocktakeError = null,
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            stocktakeState = WorkspaceLoadState.ERROR,
+                            stocktakeError = if (e is ApiException) e.safeMessage("加载盘点记录失败") else "网络不可用",
+                            stocktakes = emptyList(),
+                        )
+                    }
+                }
+        }
+    }
+
+    /** 提交盘点：在线直连，断网入队（STOCKTAKE），联网后幂等重放。 */
+    fun submitStocktake(materialCode: String, locationCode: String?, actualQuantity: Int) {
+        val code = materialCode.trim()
+        if (code.isBlank()) {
+            _state.update { it.copy(error = "物料编码必填") }
+            return
+        }
+        if (actualQuantity < 0) {
+            _state.update { it.copy(error = "实盘数量必须是非负整数") }
+            return
+        }
+        operationScope.launch {
+            _state.update { it.copy(stocktakeSubmitting = true, error = null) }
+            when (val r = repo.submitStocktakeQueued(code, locationCode?.trim()?.takeIf { it.isNotBlank() }, actualQuantity)) {
+                is SubmitResult.Success -> {
+                    _state.update { it.copy(stocktakeSubmitting = false, message = "盘点单已提交，等待仓管确认") }
+                    refreshStocktakes()
+                }
+                is SubmitResult.Queued -> {
+                    _state.update {
+                        it.copy(stocktakeSubmitting = false, message = "网络不可用，盘点已入队：${r.reason}")
+                    }
+                }
+                is SubmitResult.Failure -> _state.update { it.copy(stocktakeSubmitting = false, error = r.message) }
+            }
+        }
+    }
+
+    /** 确认盘点（仓管/管理员）。 */
+    fun confirmStocktake(stocktakeId: String) {
+        operationScope.launch {
+            _state.update { it.copy(stocktakeSubmitting = true, error = null) }
+            repo.confirmStocktake(stocktakeId)
+                .onSuccess {
+                    _state.update { it.copy(stocktakeSubmitting = false, message = "盘点已确认") }
+                    refreshStocktakes()
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            stocktakeSubmitting = false,
+                            error = if (e is ApiException) e.safeMessage("确认盘点失败") else "网络不可用",
+                        )
+                    }
+                }
+        }
+    }
+
     fun loadNextAuditPage() {
         val current = _state.value
         if (current.auditHasNext && !current.auditLoading) refreshAuditLogs(current.auditPage + 1)
@@ -3193,6 +3275,7 @@ class LogisticsViewModel(
         fun canNavigate(role: UserRole, screen: Screen): Boolean = when (screen) {
             Screen.APPROVAL -> role.canApprove
             Screen.AUDIT, Screen.USER_MANAGEMENT -> role.canAdmin
+            Screen.STOCKTAKE -> role in setOf(UserRole.MATERIAL, UserRole.WAREHOUSE_ADMIN, UserRole.ADMIN)
             Screen.BOM_IMPORT -> role in setOf(UserRole.ADMIN, UserRole.PLANNER, UserRole.WORKSHOP_SUPERVISOR)
             Screen.PRODUCTION_MANAGEMENT -> role == UserRole.ADMIN || role == UserRole.PLANNER || role == UserRole.WORKSHOP_SUPERVISOR
             Screen.CHANGE_PASSWORD -> true

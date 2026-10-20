@@ -265,6 +265,19 @@ data class User(
     val role: UserRole
 )
 
+/** 盘点单（0.5.45）：账面 vs 实盘，创建后为 PENDING_CONFIRM，需仓管/管理员确认。 */
+data class StocktakeRecord(
+    val id: String,
+    val materialCode: String,
+    val locationCode: String?,
+    val bookQuantity: Int,
+    val actualQuantity: Int,
+    val difference: Int,
+    val status: String,
+    val createdAt: String?,
+)
+
+
 data class ManagedUser(
     val id: String,
     val username: String,

@@ -7217,7 +7217,9 @@ def list_stocktakes(user: sqlite3.Row = Depends(current_user)) -> dict[str, Any]
 def stocktakes_page(c: sqlite3.Connection, limit: int, offset: int) -> list[dict[str, Any]]:
     """盘点列表分页（API 保持首 100 条；管理台按页翻）。"""
     rows = c.execute(
-        "SELECT s.*,m.code material_code FROM stocktakes s JOIN materials m ON m.id=s.material_id"
+        "SELECT s.*,m.code material_code,l.code location_code FROM stocktakes s"
+        " JOIN materials m ON m.id=s.material_id"
+        " LEFT JOIN locations l ON l.id=s.location_id"
         " ORDER BY s.created_at DESC, s.id DESC LIMIT ? OFFSET ?", (limit, offset),
     ).fetchall()
     return [dict(r) for r in rows]

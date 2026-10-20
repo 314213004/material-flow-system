@@ -203,3 +203,16 @@ def test_actions_without_csrf_rejected():
         assert c.execute("SELECT status FROM stocktakes WHERE id='st_1'").fetchone()[0] == "PENDING_CONFIRM"
         assert c.execute("SELECT status FROM exceptions WHERE id='ex_1'").fetchone()[0] == "PENDING"
         c.close()
+
+
+def test_stocktake_api_lists_location_code():
+    """App 盘点列表需要库位编码而不是内部 id（0.5.45）。"""
+    seed_warehouse_rows()
+    with TestClient(backend.app) as client:
+        token = client.post("/api/v1/auth/login",
+                            json={"username": "wh-admin", "password": "Wh@2026x", "deviceId": "t"}).json()["accessToken"]
+        r = client.get("/api/v1/stocktakes", headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 200, r.text
+        items = r.json()["items"]
+        assert items and items[0]["material_code"] == "M-001"
+        assert items[0]["location_code"] == "A-01"

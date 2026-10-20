@@ -274,6 +274,37 @@ open class LogisticsRepository(
 
     /** Workshop assembly APIs use server-side timestamps and stable idempotency keys. */
 
+    /** 盘点列表 */
+    open suspend fun stocktakes(): Result<List<com.company.logistics.model.StocktakeRecord>> = resultOf { api.listStocktakes() }
+
+    /** 确认盘点（仓管/管理员） */
+    open suspend fun confirmStocktake(stocktakeId: String, clientOperationId: String? = null): Result<String> = resultOf {
+        api.confirmStocktake(stocktakeId, clientOperationId ?: UUID.randomUUID().toString())
+    }
+
+    /**
+     * 创建盘点单：在线直连，断网入离线队列（STOCKTAKE），联网后按 clientOperationId 幂等重放。
+     * 实盘数量存队列实体的 quantity，目标库位存 targetLocation（库位可空=按物料整体盘）。
+     */
+    open suspend fun submitStocktakeQueued(
+        materialCode: String,
+        locationCode: String?,
+        actualQuantity: Int,
+        clientOperationId: String? = null,
+    ): SubmitResult = submit(
+        opType = OfflineOpType.STOCKTAKE,
+        materialCode = materialCode,
+        materialId = null,
+        quantity = actualQuantity,
+        targetLocation = locationCode?.takeIf { it.isNotBlank() },
+        expectedInventoryVersion = null,
+        remark = null,
+        clientOperationId = clientOperationId,
+        remoteCall = { clientOpId ->
+            api.createStocktake(clientOpId, materialCode, locationCode?.takeIf { it.isNotBlank() }, actualQuantity)
+        },
+    )
+
     /** 上传图片凭证（库位/异常/流转通用），返回服务端 fileId。 */
     open suspend fun uploadEvidence(bytes: ByteArray, fileName: String, purpose: String = "TRANSFER"): Result<String> =
         resultOf { api.uploadFile(bytes, fileName, purpose).fileId }
@@ -945,6 +976,12 @@ open class LogisticsRepository(
                     )
                 }
                 OfflineOpType.LOCATION_BIND -> api.bindLocation(item.materialCode, item.targetLocation ?: "", item.quantity)
+                OfflineOpType.STOCKTAKE -> api.createStocktake(
+                    clientOperationId = item.clientOperationId,
+                    materialCode = item.materialCode,
+                    locationCode = item.targetLocation,
+                    actualQuantity = item.quantity,
+                )
                 OfflineOpType.EXCEPTION -> {
                     if (item.materialId == null) {
                         dao.updateStatus(item.id, SyncStatus.FAILED.name, "缺少物料 ID，无法重放")

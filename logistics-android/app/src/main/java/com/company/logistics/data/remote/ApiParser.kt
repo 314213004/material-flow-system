@@ -214,6 +214,25 @@ object ApiParser {
         )
     }
 
+    /** 盘点列表：GET /api/v1/stocktakes → {items:[...]}。 */
+    fun parseStocktakeList(json: String): List<com.company.logistics.model.StocktakeRecord> {
+        val root = JSONObject(json)
+        val arr = root.optJSONArray("items") ?: return emptyList()
+        return List(arr.length()) { i ->
+            val o = arr.getJSONObject(i)
+            com.company.logistics.model.StocktakeRecord(
+                id = o.optString("id"),
+                materialCode = o.optString("material_code"),
+                locationCode = o.optString("location_code").takeIf { it.isNotBlank() },
+                bookQuantity = o.optInt("book_quantity"),
+                actualQuantity = o.optInt("actual_quantity"),
+                difference = o.optInt("difference"),
+                status = o.optString("status"),
+                createdAt = o.optString("created_at").takeIf { it.isNotBlank() },
+            )
+        }
+    }
+
     fun parseExceptionList(json: String): List<com.company.logistics.model.ExceptionRecord> {
         val root = JSONObject(json)
         val arr = root.optJSONArray("items") ?: return emptyList()

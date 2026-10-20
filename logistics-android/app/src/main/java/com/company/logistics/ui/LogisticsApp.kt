@@ -61,6 +61,7 @@ import com.company.logistics.ui.screens.DeviceDetailScreen
 import com.company.logistics.ui.screens.FlowDetailScreen
 import com.company.logistics.ui.screens.FlowHandoverScreen
 import com.company.logistics.ui.screens.MyExceptionsScreen
+import com.company.logistics.ui.screens.StocktakeScreen
 import com.company.logistics.ui.theme.Dimens
 import com.company.logistics.ui.theme.LogisticsTheme
 import com.company.logistics.ui.theme.LogisticsTypography
@@ -361,6 +362,19 @@ fun LogisticsApp(
                         onBack = { viewModel.navigate(Screen.WORKSPACE) },
                     )
 
+                    Screen.STOCKTAKE -> StocktakeScreen(
+                        records = state.stocktakes,
+                        state = state.stocktakeState,
+                        error = state.stocktakeError,
+                        submitting = state.stocktakeSubmitting,
+                        canConfirm = state.role == com.company.logistics.model.UserRole.WAREHOUSE_ADMIN ||
+                            state.role == com.company.logistics.model.UserRole.ADMIN,
+                        onSubmit = { code, location, actual -> viewModel.submitStocktake(code, location, actual) },
+                        onConfirm = { viewModel.confirmStocktake(it) },
+                        onRefresh = { viewModel.refreshStocktakes() },
+                        onBack = { viewModel.navigate(Screen.WORKSPACE) },
+                    )
+
                     Screen.MY_EXCEPTIONS -> MyExceptionsScreen(
                         records = state.myExceptions,
                         state = state.myExceptionsState,
@@ -441,6 +455,7 @@ fun LogisticsApp(
                         onOpenQueue = { viewModel.navigate(Screen.QUEUE) },
                         onOpenEndpointConfig = { viewModel.navigate(Screen.ENDPOINT_CONFIG) },
                         onOpenMyExceptions = { viewModel.navigate(Screen.MY_EXCEPTIONS) },
+                        onOpenStocktake = { viewModel.navigate(Screen.STOCKTAKE) },
                         myTransferRequests = state.myTransferRequests,
                         myTransferRequestsLoading = state.myTransferRequestsLoading,
                         myTransferRequestsError = state.myTransferRequestsError,

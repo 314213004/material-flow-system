@@ -30,8 +30,8 @@ android {
         applicationId = "com.company.logistics"
         minSdk = 26
         targetSdk = 34
-        versionCode = 51
-        versionName = "0.5.44"
+        versionCode = 52
+        versionName = "0.5.45"
 
         buildConfigField("String", "API_BASE_URL", "\"$escapedApiBaseUrl\"")
 

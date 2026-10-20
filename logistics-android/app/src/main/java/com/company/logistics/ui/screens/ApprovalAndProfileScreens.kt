@@ -596,6 +596,7 @@ fun ProfileScreen(
     onOpenQueue: () -> Unit,
     onOpenEndpointConfig: () -> Unit,
     onOpenMyExceptions: () -> Unit,
+    onOpenStocktake: () -> Unit = {},
     myTransferRequests: List<TransferRequest> = emptyList(),
     myTransferRequestsLoading: Boolean = false,
     myTransferRequestsError: String? = null,
@@ -764,6 +765,34 @@ fun ProfileScreen(
         }
 
         VSpace(Spacing.md)
+
+        // 盘点入口 —— 物料员/仓管/管理员可提报与确认
+        if (role == UserRole.MATERIAL || role == UserRole.WAREHOUSE_ADMIN || role == UserRole.ADMIN) {
+            AppCard {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            "盘点",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = LogisticsTheme.colors.textPrimary
+                        )
+                        VSpace(3.dp)
+                        Text(
+                            "提报实盘数量、查看待确认盘点单",
+                            fontSize = 12.sp,
+                            color = LogisticsTheme.colors.textSecondary
+                        )
+                    }
+                    SecondaryButton(
+                        text = "进入",
+                        onClick = onOpenStocktake,
+                        modifier = Modifier.width(96.dp)
+                    )
+                }
+            }
+            VSpace(Spacing.md)
+        }
 
         // 我的流转申请 —— 本人提交的出入库/调拨申请及审批进度
         AppCard {

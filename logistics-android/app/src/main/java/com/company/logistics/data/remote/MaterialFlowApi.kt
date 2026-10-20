@@ -984,6 +984,44 @@ open class MaterialFlowApi(
         )
     }
 
+    // ==================== 盘点（0.5.45） ====================
+
+    /** POST /api/v1/stocktakes：创建盘点单（PENDING_CONFIRM），返回盘点号与差异。 */
+    suspend fun createStocktake(
+        clientOperationId: String,
+        materialCode: String,
+        locationCode: String?,
+        actualQuantity: Int,
+    ): String = withContext(Dispatchers.IO) {
+        requireUuid(clientOperationId, "clientOperationId")
+        require(materialCode.isNotBlank()) { "物料编码必填" }
+        require(actualQuantity >= 0) { "实盘数量必须是非负整数" }
+        val body = JSONObject().apply {
+            put("clientOperationId", clientOperationId)
+            put("materialCode", materialCode)
+            put("locationCode", locationCode ?: JSONObject.NULL)
+            put("actualQuantity", actualQuantity)
+        }
+        val text = request("POST", "/api/v1/stocktakes", body.toString(), idempotencyKey = clientOperationId)
+        JSONObject(text).optString("stocktakeId").ifBlank {
+            throw ApiException(500, "EMPTY_BODY", "盘点响应缺少 stocktakeId", retryable = true)
+        }
+    }
+
+    /** GET /api/v1/stocktakes：盘点列表（服务端按创建时间倒序）。 */
+    suspend fun listStocktakes(): List<com.company.logistics.model.StocktakeRecord> = withContext(Dispatchers.IO) {
+        ApiParser.parseStocktakeList(request("GET", "/api/v1/stocktakes", null))
+    }
+
+    /** POST /api/v1/stocktakes/{id}/confirm：仓管/管理员确认盘点。 */
+    suspend fun confirmStocktake(stocktakeId: String, clientOperationId: String): String = withContext(Dispatchers.IO) {
+        requireUuid(clientOperationId, "clientOperationId")
+        val body = JSONObject().apply { put("clientOperationId", clientOperationId) }
+        val text = request("POST", "/api/v1/stocktakes/$stocktakeId/confirm", body.toString(),
+            idempotencyKey = clientOperationId)
+        JSONObject(text).optString("status")
+    }
+
     companion object {
         const val MAX_BOM_FILE_BYTES = 10 * 1024 * 1024
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
