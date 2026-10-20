@@ -1046,3 +1046,67 @@ def test_lookup_returns_project_codes(fake, monkeypatch):
     from app.u9.sync import lookup_orders_by_year
     r = lookup_orders_by_year(make_cfg(), 2026)
     assert r["project_codes"] == ["JSBY-26B-001"] and r["no_project"] == 1
+
+
+def test_sync_inventory_updates_when_u9_qty_changed(db, fake, monkeypatch):
+    """2026-10-20 现场问题：第二次同步在 U9 数量变化后必须真的更新本地（不是只有第一次有效）。"""
+    _patch_transport(monkeypatch, fake)
+    cfg = make_cfg(default_wh="W01")
+    run_sync("inventory", db, cfg, dry_run=False, scope="all")
+    q1 = db.execute("SELECT i.quantity FROM inventory i JOIN materials m ON m.id=i.material_id"
+                    " WHERE m.code='M001'").fetchone()[0]
+    assert q1 == 120
+    fake.inventory[0]["m_storeQty"] = 130          # M001 两批合计 120 -> 150
+    s = run_sync("inventory", db, cfg, dry_run=False, scope="all")["stats"]
+    assert s["updated"] == 1 and s["unchanged"] == 1
+    assert db.execute("SELECT i.quantity FROM inventory i JOIN materials m ON m.id=i.material_id"
+                      " WHERE m.code='M001'").fetchone()[0] == 150
+    assert db.execute("SELECT total_quantity FROM materials WHERE code='M001'").fetchone()[0] == 150
+
+
+def test_sync_inventory_zero_missing_clears_vanished_bin(db, fake, monkeypatch):
+    """U9 端库位清零/批号移走后该行不再返回：zero_missing 时本地归零，物料汇总跟着回落。"""
+    _patch_transport(monkeypatch, fake)
+    cfg = make_cfg(default_wh="W01")
+    run_sync("inventory", db, cfg, dry_run=False, scope="all")
+    # U9 里 M001/W01-A1 清零（SQL 直读路径有 StoreQty<>0，会直接不返回该行）
+    fake.inventory = [r for r in fake.inventory if not (r["m_itemCode"] == "M001" and r.get("m_binCode") == "A1")]
+    s = run_sync("inventory", db, cfg, dry_run=False, scope="all", zero_missing=True)["stats"]
+    assert s["zeroed"] == 1 and s["zero_missing"] is True
+    row = db.execute("SELECT i.quantity FROM inventory i JOIN materials m ON m.id=i.material_id"
+                     " JOIN locations l ON l.id=i.location_id WHERE m.code='M001' AND l.code='W01-A1'").fetchone()
+    assert row[0] == 0
+    assert db.execute("SELECT total_quantity FROM materials WHERE code='M001'").fetchone()[0] == 0
+
+
+def test_sync_inventory_keeps_vanished_bin_without_zero_missing(db, fake, monkeypatch):
+    """默认（zero_missing=False）保持旧行为：本地行原样保留，不擅自动数据。"""
+    _patch_transport(monkeypatch, fake)
+    cfg = make_cfg(default_wh="W01")
+    run_sync("inventory", db, cfg, dry_run=False, scope="all")
+    fake.inventory = [r for r in fake.inventory if not (r["m_itemCode"] == "M001" and r.get("m_binCode") == "A1")]
+    s = run_sync("inventory", db, cfg, dry_run=False, scope="all")["stats"]
+    assert s["zeroed"] == 0
+    row = db.execute("SELECT i.quantity FROM inventory i JOIN materials m ON m.id=i.material_id"
+                     " JOIN locations l ON l.id=i.location_id WHERE m.code='M001' AND l.code='W01-A1'").fetchone()
+    assert row[0] == 120
+
+
+def test_sync_inventory_zero_missing_does_not_touch_manual_locations(db, fake, monkeypatch):
+    """本地自建库位（非 U9 管理）的人工库存不得被归零。"""
+    _patch_transport(monkeypatch, fake)
+    cfg = make_cfg(default_wh="W01")
+    c = db
+    c.execute("INSERT INTO locations(id, code, name) VALUES('loc-manual','A-01','本地库位')")
+    c.execute("INSERT INTO inventory(id, material_id, location_id, quantity) VALUES('inv-manual','mat1','loc-manual',9)")
+    c.commit()
+    run_sync("inventory", db, cfg, dry_run=False, scope="all", zero_missing=True)
+    assert db.execute("SELECT quantity FROM inventory WHERE id='inv-manual'").fetchone()[0] == 9
+
+
+def test_build_sync_kwargs_inventory_zero_missing_default_on():
+    """接口层默认打开 zero_missing（现场"库存只第一次生效"的根因修复），可显式关掉。"""
+    from app.u9.routes import build_sync_kwargs
+    kw = build_sync_kwargs("inventory", wh="W01")
+    assert kw["zero_missing"] is True and kw["wh"] == "W01" and kw["scope"] == "local"
+    assert build_sync_kwargs("inventory", zero_missing=False)["zero_missing"] is False

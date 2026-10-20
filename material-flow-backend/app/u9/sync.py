@@ -289,7 +289,7 @@ def _sync_boms(conn, cfg, dry_run, *, product_codes=None, user_id="u9-sync", cli
 
 # ---------------------------------------------------------------- 库存
 def _sync_inventory(conn, cfg, dry_run, *, codes=None, wh=None, update_totals=True, scope="local",
-                    client=None, **_):
+                    zero_missing=False, client=None, **_):
     client = client or get_client(cfg)
     item_codes = _codes(codes)
     errors: list[dict] = []
@@ -365,6 +365,39 @@ def _sync_inventory(conn, cfg, dry_run, *, codes=None, wh=None, update_totals=Tr
         else:
             conn.execute("UPDATE inventory SET quantity=? WHERE material_id=? AND location_id=?",
                          (qty, mat[0], loc[0]))
+    # U9 端库存减少到 0、库位清空、批号移走之后，该 (料号,库位) 就不再出现在返回结果里
+    # （SQL 直读路径还有 StoreQty<>0 过滤）。默认这些本地行会原样留着，表现就是
+    # "第一次同步（全部新增）之后库存再也不动"。zero_missing 打开后按本次查询范围把这批行归零。
+    zeroed, zeroed_codes = 0, set()
+    if zero_missing:
+        managed = {loc for (_code, loc) in agg}
+        managed.update(r[0] for r in conn.execute(
+            "SELECT code FROM locations WHERE id LIKE 'u9loc-%'").fetchall())
+        if wh:
+            managed.update(r[0] for r in conn.execute(
+                "SELECT code FROM locations WHERE code LIKE ?", (f"{wh}-%",)).fetchall())
+        base_sql = ("SELECT m.code AS code, m.id AS material_id, l.id AS loc_id, l.code AS loc"
+                    "  FROM inventory i JOIN materials m ON m.id=i.material_id"
+                    "                  JOIN locations l ON l.id=i.location_id"
+                    " WHERE i.quantity<>0")
+        existing = []
+        if item_codes:
+            for start in range(0, len(item_codes), 400):
+                part = item_codes[start:start + 400]
+                existing += conn.execute(base_sql + " AND m.code IN (" + ",".join("?" * len(part)) + ")",
+                                         part).fetchall()
+        elif scope != "all":
+            existing = []
+        else:
+            existing = conn.execute(base_sql).fetchall()
+        for r in existing:
+            if r["loc"] not in managed or (r["code"], r["loc"]) in agg:
+                continue
+            zeroed += 1
+            zeroed_codes.add(r["code"])
+            if not dry_run:
+                conn.execute("UPDATE inventory SET quantity=0 WHERE material_id=? AND location_id=?",
+                             (r["material_id"], r["loc_id"]))
     totals_changed = 0
     for code, (mid, store, avail, old_total, old_avail) in totals.items():
         nt, na = int(round(store)), int(round(avail))
@@ -373,10 +406,24 @@ def _sync_inventory(conn, cfg, dry_run, *, codes=None, wh=None, update_totals=Tr
             if not dry_run and update_totals:
                 conn.execute("UPDATE materials SET total_quantity=?, available_quantity=?, version=version+1"
                              " WHERE id=?", (nt, na, mid))
+    # 本次 U9 一条都没返回、但有库位被归零的料号：物料汇总也要跟着回落到本地库存表的真实合计，
+    # 否则"库位已清零、物料总量仍挂在旧值"。
+    for code in sorted(zeroed_codes - set(totals)):
+        mat = conn.execute("SELECT id FROM materials WHERE code=?", (code,)).fetchone()
+        if not mat:
+            continue
+        totals_changed += 1
+        if not dry_run and update_totals:
+            left = conn.execute("SELECT COALESCE(sum(quantity),0) FROM inventory WHERE material_id=?",
+                                (mat[0],)).fetchone()[0]
+            # 可用量近似取剩余现存量（U9 可用量口径只有同步时才有值，清零后无来源）
+            conn.execute("UPDATE materials SET total_quantity=?, available_quantity=?, version=version+1"
+                         " WHERE id=?", (int(left), int(left), mat[0]))
     return {"total": len(raw), "rows": len(agg), "inserted": inserted, "updated": updated,
             "unchanged": unchanged, "skipped": skipped, "unknown_materials": unknown[:200],
             "unknown_count": len(unknown), "fractional_rounded": fractional,
             "materials_totals_changed": totals_changed, "update_totals": bool(update_totals),
+            "zero_missing": bool(zero_missing), "zeroed": zeroed,
             "qty_field": cfg.inventory_qty_field, "wh": wh or cfg.default_wh or "",
             "requested": len(item_codes), "scope": "codes" if codes else scope,
             "errors": errors[:50], "sample": sample}

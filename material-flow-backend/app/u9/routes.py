@@ -57,7 +57,7 @@ def _require_ready() -> dict:
 def build_sync_kwargs(entity: str, *, codes: str = "", product_codes: str = "", doc_nos: str = "",
                       projects: str = "",
                       wh: str = "", include_local: bool = True, update_totals: bool = True,
-                      user_id: str = "", scope: str = "local") -> dict:
+                      user_id: str = "", scope: str = "local", zero_missing: bool = True) -> dict:
     """把接口/表单参数整理成 run_sync 的 kwargs；BOM 缺编码时抛 ApiError(400)。"""
     split = lambda v: [p.strip() for p in (v or "").replace("\n", ",").replace("，", ",").split(",") if p.strip()]
     if entity == "items":
@@ -69,7 +69,8 @@ def build_sync_kwargs(entity: str, *, codes: str = "", product_codes: str = "", 
         return {"product_codes": pc, "user_id": user_id}
     if entity == "inventory":
         return {"codes": split(codes), "wh": wh.strip(), "update_totals": update_totals,
-                "scope": "all" if (scope or "").strip().lower() == "all" else "local"}
+                "scope": "all" if (scope or "").strip().lower() == "all" else "local",
+                "zero_missing": zero_missing}
     if entity == "orders":
         return {"doc_nos": split(doc_nos), "include_local": include_local}
     if entity == "projects":
@@ -120,6 +121,7 @@ def u9_sync(entity: str,
             include_local: bool = Query(default=True, description="items/orders：是否包含本地已有编码/单号"),
             update_totals: bool = Query(default=True, description="inventory：是否回写物料总量/可用量"),
             scope: str = Query(default="local", description="inventory：local=按本地全部料号逐个查（默认）；all=按组织整体查"),
+            zero_missing: bool = Query(default=True, description="inventory：U9 已清零/不再返回的库位是否在本地归零（默认开）"),
             user: sqlite3.Row = Depends(current_user)):
     _admin(user)
     cfg = _require_ready()
@@ -128,7 +130,7 @@ def u9_sync(entity: str,
     kwargs = build_sync_kwargs(entity, codes=codes, product_codes=product_codes, doc_nos=doc_nos,
                                projects=projects,
                                wh=wh, include_local=include_local, update_totals=update_totals,
-                               user_id=user["id"], scope=scope)
+                               user_id=user["id"], scope=scope, zero_missing=zero_missing)
     c = db()
     try:
         return run_sync(entity, c, cfg, dry_run=dry_run, **kwargs)

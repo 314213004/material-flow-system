@@ -91,6 +91,7 @@
         <label class="u9-check"><input type="checkbox" name="scope" value="all">改为按组织整体查询（不按料号）</label>
         {% if config.inventory_via_sql %}<p class="muted" style="margin:0;font-size:12px">可用量为近似值：可用状态现存量减预留占用。</p>
         {% else %}<p class="muted" style="margin:0;font-size:12px">注：现场 U9 的整体查询目前在 U9 服务器端报 SQL CLR 程序集错误（ufida.u9.sql.clrlib），需 U9 运维处理；按料号查询正常。</p>{% endif %}
+        <label class="u9-check"><input type="checkbox" name="zero_missing" value="1" checked>U9 已清零/不再返回的库位，本地同步归零</label>
         <input type="hidden" name="update_totals" value="1">
       {% elif e.id == "projects" %}
         <p style="margin:0 0 6px"><a href="/admin/u9/orders/lookup">按年份 / 项目号查找订单，清理导入订单 →</a></p>

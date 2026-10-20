@@ -2677,7 +2677,8 @@ async def admin_u9_sync(request: Request, entity: str):
             wh=str(form.get("wh", "")),
             include_local=str(form.get("include_local", "")) in ("1", "on", "true"),
             update_totals=str(form.get("update_totals", "1")) in ("1", "on", "true"),
-            user_id=user["id"], scope=str(form.get("scope", "local")))
+            user_id=user["id"], scope=str(form.get("scope", "local")),
+            zero_missing=str(form.get("zero_missing", "1")) in ("1", "on", "true"))
     except _HTTPException as e:
         return _see_other("/admin/u9?msg=" + quote(str(getattr(e, "detail", "") or "参数错误")) + "&ok=0")
     from starlette.concurrency import run_in_threadpool
@@ -2712,7 +2713,8 @@ async def admin_u9_sync(request: Request, entity: str):
         return _see_other(f"/admin/u9?msg={quote(msg)}&ok=1&run={run}#run-detail")
     msg = (f"{U9_ENTITY_LABELS.get(entity, entity)}{mode}完成：U9 返回 {s.get('total', 0)} 条，"
            f"新增 {s.get('inserted', 0)}，更新 {s.get('updated', 0)}，"
-           f"不变 {s.get('unchanged', 0)}，跳过 {s.get('skipped', 0)}")
+           f"不变 {s.get('unchanged', 0)}，跳过 {s.get('skipped', 0)}"
+           + (f"，库位归零 {s.get('zeroed', 0)}" if s.get("zeroed") else ""))
     return _see_other(f"/admin/u9?msg={quote(msg)}&ok=1&run={run}#run-detail")
 
 
