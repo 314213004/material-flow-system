@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Icon
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Badge
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -65,6 +66,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import com.company.logistics.rendering.FilamentModelRenderer
 import com.company.logistics.rendering.PartInfo
 import com.company.logistics.rendering.PartNameCn
+import com.company.logistics.ui.components.LogisticsIcons
 import com.company.logistics.ui.theme.LogisticsColors
 import kotlinx.coroutines.launch
 import java.io.File
@@ -292,10 +294,11 @@ fun Model3dViewerScreen(
                             .clickable { controlsExpanded = !controlsExpanded },
                         contentAlignment = Alignment.Center,
                     ) {
-                        Text(
-                            if (controlsExpanded) "×" else "☰",
-                            fontSize = 20.sp,
-                            color = Color.White,
+                        Icon(
+                            imageVector = if (controlsExpanded) LogisticsIcons.Close else LogisticsIcons.List,
+                            contentDescription = if (controlsExpanded) "收起控制面板" else "展开控制面板",
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp),
                         )
                     }
                     // 展开的半透明控制面板：零件 / 重置视角 / 爆炸图

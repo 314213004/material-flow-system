@@ -15,6 +15,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
@@ -31,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.company.logistics.model.MaterialInventory
 import com.company.logistics.ui.components.AppCard
+import com.company.logistics.ui.components.LogisticsIcons
 import com.company.logistics.ui.components.PrimaryButton
 import com.company.logistics.ui.components.SecondaryButton
 import com.company.logistics.ui.components.SectionTitle
@@ -129,13 +131,24 @@ fun MaterialDetailScreen(
                         shape = RoundedCornerShape(10.dp),
                         color = Color.White,
                     ) {
-                        Text(
-                            "✓ 扫码成功 · 已获取库存",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = LogisticsTheme.colors.success,
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
                             modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                        )
+                        ) {
+                            Icon(
+                                imageVector = LogisticsIcons.Check,
+                                contentDescription = null,
+                                tint = LogisticsTheme.colors.success,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                "扫码成功 · 已获取库存",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = LogisticsTheme.colors.success,
+                            )
+                        }
                     }
                 }
             }

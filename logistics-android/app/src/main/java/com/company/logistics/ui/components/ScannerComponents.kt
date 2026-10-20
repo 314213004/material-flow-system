@@ -512,6 +512,25 @@ object LogisticsIcons {
         }
     }
 
+    /** 关闭（×）：收起面板 / 取消浮层。 */
+    val Close: ImageVector by lazy {
+        icon("Close") {
+            moveTo(5.6f, 4.2f)
+            lineTo(4.2f, 5.6f)
+            lineTo(10.6f, 12f)
+            lineTo(4.2f, 18.4f)
+            lineTo(5.6f, 19.8f)
+            lineTo(12f, 13.4f)
+            lineTo(18.4f, 19.8f)
+            lineTo(19.8f, 18.4f)
+            lineTo(13.4f, 12f)
+            lineTo(19.8f, 5.6f)
+            lineTo(18.4f, 4.2f)
+            lineTo(12f, 10.6f)
+            close()
+        }
+    }
+
     /**
      * 把历史遗留的符号字符串翻译成矢量图标。
      *

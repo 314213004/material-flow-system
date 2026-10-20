@@ -20,6 +20,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -52,6 +53,7 @@ import com.company.logistics.model.OrderMaterialStatus
 import com.company.logistics.model.MaterialBatchAction
 import com.company.logistics.model.UserRole
 import com.company.logistics.model.batchKey
+import com.company.logistics.ui.components.LogisticsIcons
 import com.company.logistics.ui.components.MaterialBatchActionBar
 import com.company.logistics.ui.components.MaterialBatchCheckBox
 import com.company.logistics.ui.components.MaterialBatchDialog
@@ -283,13 +285,24 @@ fun OrderDetailScreen(
                                 shape = RoundedCornerShape(10.dp),
                                 color = Color.White.copy(alpha = 0.22f),
                             ) {
-                                Text(
-                                    "✓ 物料齐套",
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Color.White,
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 10.dp, vertical = 5.dp),
-                                )
+                                ) {
+                                    Icon(
+                                        imageVector = LogisticsIcons.Check,
+                                        contentDescription = null,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(14.dp),
+                                    )
+                                    Spacer(Modifier.width(4.dp))
+                                    Text(
+                                        "物料齐套",
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color.White,
+                                    )
+                                }
                             }
                         }
                     }
