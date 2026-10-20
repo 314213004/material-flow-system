@@ -4229,9 +4229,15 @@ def order_detail(
     if user["role"] not in {"ADMIN", "WORKSHOP_SUPERVISOR", "ASSEMBLER"} and not scoped:
         c.close()
         raise ApiError(403, CODE_FORBIDDEN, "无权查看该订单")
+    # 协作装配：非 LEAD 成员（assembly_task_members 未移除）同样可以查看该订单，
+    # 否则多人协作的机台装配在成员端一律 403。仅放行"本人参与的任务"，
+    # 不改变其它角色的可见范围（见下方 task_where）。
     if user["role"] == "ASSEMBLER" and not c.execute(
-        "SELECT 1 FROM assembly_tasks WHERE order_no=? AND assigned_assembler_id=?",
-        (order_no, user["id"]),
+        """SELECT 1 FROM assembly_tasks t
+            WHERE t.order_no=? AND (t.assigned_assembler_id=? OR EXISTS (
+                  SELECT 1 FROM assembly_task_members m
+                   WHERE m.task_id=t.id AND m.assembler_id=? AND m.removed_at IS NULL))""",
+        (order_no, user["id"], user["id"]),
     ).fetchone():
         c.close()
         raise ApiError(403, CODE_FORBIDDEN, "无权查看该订单")
@@ -4239,7 +4245,12 @@ def order_detail(
     if user["role"] in {"ADMIN", "WORKSHOP_SUPERVISOR"}:
         task_where, task_args = "order_no=?", [order_no]
     elif user["role"] == "ASSEMBLER":
-        task_where, task_args = "order_no=? AND assigned_assembler_id=?", [order_no, user["id"]]
+        task_where, task_args = (
+            "order_no=? AND (assigned_assembler_id=? OR EXISTS ("
+            "SELECT 1 FROM assembly_task_members m WHERE m.task_id=assembly_tasks.id"
+            " AND m.assembler_id=? AND m.removed_at IS NULL))",
+            [order_no, user["id"], user["id"]],
+        )
     else:
         task_where, task_args = "1=0", []
     task_total = c.execute(
@@ -4385,7 +4396,12 @@ def order_task_detail(
     if not t:
         c.close()
         raise ApiError(404, "TASK_NOT_FOUND", "机台任务不存在", retryable=False)
-    if user["role"] == "ASSEMBLER" and t["assigned_assembler_id"] != user["id"]:
+    # ASSEMBLER 可见性：LEAD（assigned_assembler_id）或 assembly_task_members 中
+    # 未移除的成员（协作装配）。判权范围与列表接口 main.py 中同一谓词保持一致。
+    if user["role"] == "ASSEMBLER" and t["assigned_assembler_id"] != user["id"] and not c.execute(
+        "SELECT 1 FROM assembly_task_members WHERE task_id=? AND assembler_id=? AND removed_at IS NULL",
+        (task_id, user["id"]),
+    ).fetchone():
         c.close()
         raise ApiError(403, CODE_FORBIDDEN, "无权查看该机台")
     if user["role"] not in {"ADMIN", "WORKSHOP_SUPERVISOR", "ASSEMBLER"}:
