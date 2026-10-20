@@ -535,7 +535,9 @@ open class LogisticsRepository(
         quantity = quantity,
         targetLocation = null,
         expectedInventoryVersion = inventory.version,
-        remark = remark,
+        // 队列实体没有 documentNo 字段：入队时打包进 remark JSON，重放时还原（见 [syncOne]）。
+        // 不打包会让补传的单据丢失订单号，齐套与追溯统计漏计。
+        remark = packQueuedTransferRemark(documentNo, null, remark),
         clientOperationId = clientOperationId,
         remoteCall = { clientOpId ->
             api.createTransferRequest(
@@ -652,6 +654,25 @@ open class LogisticsRepository(
             put("sourceLocation", sourceLocation ?: JSONObject.NULL)
             put("remark", remark ?: JSONObject.NULL)
         }.toString()
+
+    /**
+     * 还原 [packQueuedTransferRemark] 写出的打包 JSON。
+     *
+     * 升级前入队的旧记录 remark 是裸业务文本：解析失败或缺少 `documentNo` 字段时返回 null，
+     * 由调用方按"无 documentNo"兼容重放（保持 null），不把老数据判成损坏。
+     */
+    private fun unpackQueuedTransferRemark(raw: String?): QueuedTransferRemark? {
+        val packed = try {
+            JSONObject(raw ?: "")
+        } catch (_: Exception) {
+            return null
+        }
+        if (!packed.has("documentNo")) return null
+        return QueuedTransferRemark(
+            documentNo = packed.optStringOrNull("documentNo"),
+            remark = packed.optStringOrNull("remark"),
+        )
+    }
 
     /** 提交库位绑定（简化流程，无需审批） */
     suspend fun submitLocationBinding(
@@ -787,14 +808,22 @@ open class LogisticsRepository(
                         dao.updateStatus(item.id, SyncStatus.FAILED.name, "缺少物料 ID，无法重放")
                         return SyncOutcome.FAILED
                     }
+                    // OUTBOUND 入队时 documentNo 打包在 remark JSON 里（见 submitOutbound），
+                    // 重放必须还原，否则补传单据不挂订单，齐套与追溯统计漏计。
+                    // 旧队列的 remark 是裸业务文本：解不出打包结构时按"无 documentNo"兼容，不判数据损坏。
+                    val queued = if (item.operationType == OfflineOpType.OUTBOUND.name) {
+                        unpackQueuedTransferRemark(item.remark)
+                    } else {
+                        null
+                    }
                     api.createTransferRequest(
                         clientOperationId = item.clientOperationId,
                         type = if (item.operationType == OfflineOpType.INBOUND.name) "INBOUND" else "OUTBOUND",
-                        documentNo = null,
+                        documentNo = queued?.documentNo,
                         items = listOf(TransferItem(materialId = item.materialId, quantity = item.quantity,
                             targetLocationCode = item.targetLocation,
                             expectedInventoryVersion = item.expectedInventoryVersion)),
-                        remark = item.remark,
+                        remark = if (queued != null) queued.remark else item.remark,
                     )
                 }
                 OfflineOpType.RETURN, OfflineOpType.RELOCATION -> {
@@ -954,6 +983,9 @@ data class SyncReport(val success: Int, val failed: Int, val conflict: Int) {
 }
 
 private enum class SyncOutcome { SUCCESS, FAILED, CONFLICT }
+
+/** 离线队列中打包的流转 remark：documentNo / sourceLocation / remark 三项，见 packQueuedTransferRemark。 */
+private data class QueuedTransferRemark(val documentNo: String?, val remark: String?)
 
 /** 本地实体 → 领域模型 */
 private fun OfflineOperationEntity.toDomain(): OfflineOperation = OfflineOperation(
