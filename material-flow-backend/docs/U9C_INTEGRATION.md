@@ -249,3 +249,13 @@ select top 20 * from InvTrans_WhQoh where ItemInfo_ItemCode = '30414001-00045';
 - 同步结果里记录「与上次同步相比发生变化的行数」；连续 N 次为 0 且返回行数完全不变时，在管理台给黄色提示「U9 现存量疑似未刷新」，避免把数据源问题误判成同步故障。
 - 库存数量目前只存整数（`inventory.quantity INTEGER`），U9 小数料号会被四舍五入（78.65→79、4.8→5），变化不足 0.5 的调整会被判「不变」；如需按小数管料，需改表结构 + 迁移 + App 显示。
 - 库位粒度目前只到「存储地点-库位」（现场为 `14-W1`、`14-L1`），若现场要按货位管理，需 U9 侧启用 `BinInfo_Code`。
+
+## 装配工物料可见性的关联键（2026-10-20 修复，0.21.5）
+
+装配工（含协作成员）在订单详情/工作台能看到的物料，由 `_workspace_requirements_sql` 的 ASSEMBLER 分支收敛，关联键是**机台号 `device_no`**，不是 `device_id`：
+
+- `order_material_requirements.device_id` 指向 `order_devices(id)`（U9 导入为 `u9od-<MO>`）；
+- `assembly_tasks.device_id` 指向 `devices(id)`（U9 导入为 `u9dev-<MO>` 或既有设备主键）；
+- 两套 id 天然不同，用 `device_id` 关联会让装配工（含 LEAD）的物料清单一律为空、齐套恒为 0。
+
+同一谓词还包含 `assembly_task_members` 中未移除的协作成员（`removed_at IS NULL`）。机台详情端点的物料一直走 `device_no` 关联，本次把订单详情/工作台对齐到同一口径。回归测试：`tests/test_assembler_material_visibility.py`（三种建单形态 × LEAD/成员/非成员/已移除成员）。

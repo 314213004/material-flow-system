@@ -4753,25 +4753,36 @@ def _workspace_requirements_sql(
         if material_id:
             args.extend([material_id] * 4)
     elif effective_role == "ASSEMBLER":
-        # Assemblers may see material facts only for devices on their assigned
-        # tasks; this keeps the aggregate consistent with task ownership.
+        # 装配工只能看到本人（主责 LEAD 或协作成员）任务对应机台的物料事实。
+        # 关联键必须用机台号 device_no，不能用 device_id：order_material_requirements.device_id
+        # 指向 order_devices(id)，而 assembly_tasks.device_id 指向 devices(id)，U9 项目导入 /
+        # 报价导入的订单两套 id 天然不同（u9od-… vs u9dev-…），用 device_id 关联会让装配工
+        # 连 LEAD 的物料清单一律为空（现场在产订单全部命中）。机台详情端点也走 device_no。
         assembler_id = user["id"] if view_role is None else None
         if assembler_id:
             query += """
                 AND EXISTS (
                     SELECT 1 FROM assembly_tasks at
                      WHERE at.order_no = o.order_no
-                       AND at.device_id = r.device_id
-                       AND at.assigned_assembler_id = ?
+                       AND at.device_no = d.device_no
+                       AND (
+                           at.assigned_assembler_id = ?
+                           OR EXISTS (
+                               SELECT 1 FROM assembly_task_members atm
+                                WHERE atm.task_id = at.id
+                                  AND atm.assembler_id = ?
+                                  AND atm.removed_at IS NULL
+                           )
+                       )
                 )
             """
-            args.append(assembler_id)
+            args.extend([assembler_id, assembler_id])
         else:
             query += """
                 AND EXISTS (
                     SELECT 1 FROM assembly_tasks at
                      JOIN users au ON au.id=at.assigned_assembler_id
-                     WHERE at.order_no=o.order_no AND at.device_id=r.device_id
+                     WHERE at.order_no=o.order_no AND at.device_no=d.device_no
                        AND au.role='ASSEMBLER' AND au.active=1
                 )
             """
