@@ -114,6 +114,32 @@ def test_non_member_and_removed_member_still_forbidden():
         assert client.get("/api/v1/orders/OM-2/tasks/task-o1", headers=H(outsider)).status_code == 200
 
 
+def test_member_cross_order_detail_forbidden():
+    """P2-4-a：OM-1 的合法成员请求 OM-2 的订单详情 → 403（跨订单不因协作成员身份放行）。
+
+    这是改谓词时最容易写漏的方向：只要把 `order_no` 条件写丢，其它用例会全绿。
+    """
+    seed()
+    with TestClient(backend.app) as client:
+        member = login(client, "asm-member")
+        # 先确认该 token 本身有效，避免"全是 403"式的假通过
+        assert client.get("/api/v1/orders/OM-1/detail", headers=H(member)).status_code == 200
+        r = client.get("/api/v1/orders/OM-2/detail", headers=H(member))
+        assert r.status_code == 403, r.text
+        assert r.json()["error"]["code"] == "FORBIDDEN"
+
+
+def test_member_cross_order_task_detail_forbidden():
+    """P2-4-b：OM-1 的合法成员请求 OM-2 的机台任务详情 → 403（task-o1 主责 asm-outsider）。"""
+    seed()
+    with TestClient(backend.app) as client:
+        member = login(client, "asm-member")
+        assert client.get("/api/v1/orders/OM-1/tasks/task-m1", headers=H(member)).status_code == 200
+        t = client.get("/api/v1/orders/OM-2/tasks/task-o1", headers=H(member))
+        assert t.status_code == 403, t.text
+        assert t.json()["error"]["code"] == "FORBIDDEN"
+
+
 def test_supervisor_scope_unchanged():
     seed()
     with TestClient(backend.app) as client:

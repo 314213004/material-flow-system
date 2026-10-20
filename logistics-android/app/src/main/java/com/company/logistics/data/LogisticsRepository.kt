@@ -647,32 +647,55 @@ open class LogisticsRepository(
         )
     }
 
-    /** 退料/调拨入队时，队列实体缺 documentNo/sourceLocation 字段，与异常同样打包为 JSON 存 remark。 */
+    /**
+     * 退料/调拨/出库入队时，队列实体缺 documentNo/sourceLocation 字段，与异常同样打包为 JSON 存 remark。
+     *
+     * 打包体带 `v` 版本标记：解包时以它区分"我方结构"与"用户恰好输入的合法 JSON"
+     * （见 [unpackQueuedTransferRemark]）。字段语义（documentNo/sourceLocation/remark）不变。
+     */
     private fun packQueuedTransferRemark(documentNo: String?, sourceLocation: String?, remark: String?): String =
         JSONObject().apply {
+            put(QUEUED_REMARK_VERSION_KEY, QUEUED_REMARK_VERSION)
             put("documentNo", documentNo ?: JSONObject.NULL)
             put("sourceLocation", sourceLocation ?: JSONObject.NULL)
             put("remark", remark ?: JSONObject.NULL)
         }.toString()
 
     /**
-     * 还原 [packQueuedTransferRemark] 写出的打包 JSON。
+     * 还原 [packQueuedTransferRemark] 写出的打包 JSON，返回三态（见 [QueuedRemarkParse]）。
      *
-     * 升级前入队的旧记录 remark 是裸业务文本：解析失败或缺少 `documentNo` 字段时返回 null，
-     * 由调用方按"无 documentNo"兼容重放（保持 null），不把老数据判成损坏。
+     * 判定顺序：
+     *  1. 解析成功且 `v==1` → 新打包体；
+     *  2. 解析成功但无版本标记、且 `documentNo/sourceLocation/remark` 三键齐全 → 升级前的旧打包体
+     *     （[packQueuedTransferRemark] 恒写三键），仍按打包体还原，保证已入队数据不丢 documentNo；
+     *  3. 解析失败但形如打包体（以 `{` 开头且含 `documentNo` 键）→ 数据被写坏，调用方必须判损坏，
+     *     不得降级成"旧裸文本"静默重放；
+     *  4. 其余（裸业务文本、或形如 `{"documentNo":"OM-9"}` 的用户备注）→ 非打包体，
+     *     按"无 documentNo"兼容重放，`remark` 原样透传。
      */
-    private fun unpackQueuedTransferRemark(raw: String?): QueuedTransferRemark? {
+    private fun unpackQueuedTransferRemark(raw: String?): QueuedRemarkParse {
+        val text = raw?.trim()
+        if (text.isNullOrEmpty()) return QueuedRemarkParse.NotPacked
         val packed = try {
-            JSONObject(raw ?: "")
+            JSONObject(text)
         } catch (_: Exception) {
-            return null
+            return if (text.startsWith("{") && text.contains("\"documentNo\"")) {
+                QueuedRemarkParse.Corrupted
+            } else {
+                QueuedRemarkParse.NotPacked
+            }
         }
-        if (!packed.has("documentNo")) return null
-        return QueuedTransferRemark(
-            documentNo = packed.optStringOrNull("documentNo"),
-            remark = packed.optStringOrNull("remark"),
-        )
+        if (packed.optInt(QUEUED_REMARK_VERSION_KEY, 0) == QUEUED_REMARK_VERSION) {
+            return QueuedRemarkParse.Packed(packed.toQueuedTransferRemark())
+        }
+        val legacyPacked = packed.has("documentNo") && packed.has("sourceLocation") && packed.has("remark")
+        return if (legacyPacked) QueuedRemarkParse.Packed(packed.toQueuedTransferRemark()) else QueuedRemarkParse.NotPacked
     }
+
+    private fun JSONObject.toQueuedTransferRemark() = QueuedTransferRemark(
+        documentNo = optStringOrNull("documentNo"),
+        remark = optStringOrNull("remark"),
+    )
 
     /** 提交库位绑定（简化流程，无需审批） */
     suspend fun submitLocationBinding(
@@ -810,9 +833,18 @@ open class LogisticsRepository(
                     }
                     // OUTBOUND 入队时 documentNo 打包在 remark JSON 里（见 submitOutbound），
                     // 重放必须还原，否则补传单据不挂订单，齐套与追溯统计漏计。
-                    // 旧队列的 remark 是裸业务文本：解不出打包结构时按"无 documentNo"兼容，不判数据损坏。
+                    // 旧队列的 remark 是裸业务文本：解不出打包结构时按"无 documentNo"兼容，不判数据损坏；
+                    // 但形如打包体却解析失败（DB 半写、迁移、人工改表）必须判损坏——否则会降级成
+                    // 无 documentNo 的重放并标 SYNCED，把要修的"齐套漏计"静默复活（与 RETURN/RELOCATION 一致）。
                     val queued = if (item.operationType == OfflineOpType.OUTBOUND.name) {
-                        unpackQueuedTransferRemark(item.remark)
+                        when (val parsed = unpackQueuedTransferRemark(item.remark)) {
+                            is QueuedRemarkParse.Corrupted -> {
+                                dao.updateStatus(item.id, SyncStatus.FAILED.name, "队列数据损坏，无法重放")
+                                return SyncOutcome.FAILED
+                            }
+                            is QueuedRemarkParse.Packed -> parsed.value
+                            QueuedRemarkParse.NotPacked -> null
+                        }
                     } else {
                         null
                     }
@@ -983,6 +1015,22 @@ data class SyncReport(val success: Int, val failed: Int, val conflict: Int) {
 }
 
 private enum class SyncOutcome { SUCCESS, FAILED, CONFLICT }
+
+/** 打包体版本标记：区分"我方写的结构"与"用户恰好输入的合法 JSON"。 */
+private const val QUEUED_REMARK_VERSION_KEY = "v"
+private const val QUEUED_REMARK_VERSION = 1
+
+/**
+ * 离线队列 remark 解包结果：
+ *  - [Packed] 我方打包体（新格式带 `v=1`，或升级前无 `v` 但三键齐全的旧打包体）；
+ *  - [NotPacked] 用户文本（含"恰好是合法 JSON"的备注）→ 按无 documentNo 兼容重放；
+ *  - [Corrupted] 形如打包体（以 `{` 开头且含 `documentNo` 键）却解析失败 → 调用方必须判数据损坏。
+ */
+private sealed interface QueuedRemarkParse {
+    data class Packed(val value: QueuedTransferRemark) : QueuedRemarkParse
+    object NotPacked : QueuedRemarkParse
+    object Corrupted : QueuedRemarkParse
+}
 
 /** 离线队列中打包的流转 remark：documentNo / sourceLocation / remark 三项，见 packQueuedTransferRemark。 */
 private data class QueuedTransferRemark(val documentNo: String?, val remark: String?)

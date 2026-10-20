@@ -4243,18 +4243,21 @@ def order_detail(
         raise ApiError(403, CODE_FORBIDDEN, "无权查看该订单")
 
     if user["role"] in {"ADMIN", "WORKSHOP_SUPERVISOR"}:
-        task_where, task_args = "order_no=?", [order_no]
+        task_where, task_args = "t.order_no=?", [order_no]
     elif user["role"] == "ASSEMBLER":
+        # 直接用别名 t 编写谓词，与下方两条 SQL 的 `FROM assembly_tasks t` 对齐；
+        # 不再用 str.replace("assembly_tasks","t") 做字符串级别名改写——那种改写一旦
+        # task_where 里出现含 assembly_tasks 的字面量或别名就会静默改错（失败方式是数据错而非测试红）。
         task_where, task_args = (
-            "order_no=? AND (assigned_assembler_id=? OR EXISTS ("
-            "SELECT 1 FROM assembly_task_members m WHERE m.task_id=assembly_tasks.id"
+            "t.order_no=? AND (t.assigned_assembler_id=? OR EXISTS ("
+            "SELECT 1 FROM assembly_task_members m WHERE m.task_id=t.id"
             " AND m.assembler_id=? AND m.removed_at IS NULL))",
             [order_no, user["id"], user["id"]],
         )
     else:
         task_where, task_args = "1=0", []
     task_total = c.execute(
-        f"SELECT count(*) AS n FROM assembly_tasks WHERE {task_where}", task_args
+        f"SELECT count(*) AS n FROM assembly_tasks t WHERE {task_where}", task_args
     ).fetchone()["n"]
     task_rows = c.execute(
         f"""SELECT t.id,t.device_id,t.device_no,d.device_name AS device_name,t.status,t.progress_stage,t.task_version,
@@ -4263,7 +4266,7 @@ def order_detail(
                        FROM assembly_task_members m2 LEFT JOIN users u2 ON u2.id = m2.assembler_id
                       WHERE m2.task_id = t.id AND m2.removed_at IS NULL) AS member_names
                FROM assembly_tasks t LEFT JOIN devices d ON d.id = t.device_id
-               LEFT JOIN users au ON au.id = t.assigned_assembler_id WHERE {task_where.replace("assembly_tasks", "t")}
+               LEFT JOIN users au ON au.id = t.assigned_assembler_id WHERE {task_where}
               ORDER BY t.created_at,t.id LIMIT ? OFFSET ?""",
         task_args + [pageSize, (page - 1) * pageSize],
     ).fetchall()
