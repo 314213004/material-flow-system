@@ -38,6 +38,30 @@ class MaterialStatusPagingTest {
     }
 
     @Test
+    fun shortageCountUsesServerFullScopeCount() {
+        // 当前页只有 1 条缺料，但订单全量有 37 行缺料 → 必须显示 37
+        val json = """
+            {"documentNo":"OM-4","documentType":"PRODUCTION_ORDER",
+             "items":[{"materialId":"m1","materialCode":"M-1","materialName":"甲",
+                       "requiredQuantity":10,"arrivedQuantity":0,"inStockQuantity":0,"statusCode":"OUT_OF_STOCK"}],
+             "shortageLineCount":37,"total":400,"page":1,"pageSize":1,"hasMore":true}
+        """.trimIndent()
+        val status = com.company.logistics.data.remote.ApiParser.parseOrderMaterialStatus(json)
+        assertEquals(37, status.shortageCount)
+        assertEquals(400, status.total)
+        assertTrue(status.hasMore)
+    }
+
+    @Test
+    fun shortageCountFallsBackToItemsWhenServerOmitsIt() {
+        val json = """{"documentNo":"OM-5","documentType":"PRODUCTION_ORDER",
+            "items":[{"materialId":"m1","materialCode":"M-1","materialName":"甲",
+                      "requiredQuantity":1,"arrivedQuantity":0,"inStockQuantity":0,"statusCode":"OUT_OF_STOCK"}]}"""
+        val status = com.company.logistics.data.remote.ApiParser.parseOrderMaterialStatus(json)
+        assertEquals(1, status.shortageCount)
+    }
+
+    @Test
     fun fulfillmentRateUsesServerSummaryWhenPaged() {
         val json = """
             {"documentNo":"OM-3","documentType":"PRODUCTION_ORDER",

@@ -409,6 +409,8 @@ data class OrderMaterialStatus(
     /** 服务端汇总（全量口径）。分页时不能用当前页求和算齐套率。 */
     val summaryRequired: Int? = null,
     val summaryInStock: Int? = null,
+    /** 服务端给的缺料行数（全量口径）；分页时不能拿当前页 items 数缺料。 */
+    val shortageLineCount: Int? = null,
 ) {
     /** 齐套率：已入库数量 / 需求数量（优先用服务端全量汇总） */
     val fulfillmentRate: Float
@@ -419,8 +421,9 @@ data class OrderMaterialStatus(
             return (inStock.toFloat() / required).coerceIn(0f, 1f)
         }
 
-    /** 缺料物料数量 */
-    val shortageCount: Int get() = items.count { it.statusCode == MaterialStatusCode.OUT_OF_STOCK }
+    /** 缺料数量：优先用服务端全量口径，分页时不会因为只加载了一页而变少。 */
+    val shortageCount: Int
+        get() = shortageLineCount ?: items.count { it.statusCode == MaterialStatusCode.OUT_OF_STOCK }
 }
 
 /** 工作台上的可用性与计数。count 为 null 表示服务端当前没有提供该状态域数据。 */

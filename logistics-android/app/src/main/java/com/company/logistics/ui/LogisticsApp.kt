@@ -277,6 +277,8 @@ fun LogisticsApp(
                                 exceptionType = b.exceptionType,
                             )
                         },
+                        loadingMoreMaterials = state.materialLoadingMore,
+                        onLoadMoreMaterials = { viewModel.loadMoreOrderMaterials() },
                     )
 
                     Screen.QUEUE -> QueueScreen(

@@ -5,7 +5,7 @@
 {% from "_pagination.html" import simple_pager %}
 <div class="compact">
 <h2>审计日志</h2>
-{{ flash(error=error) }}
+{{ flash(notice_text, error) }}
 <div class="card">
   <form method="get" action="/admin/audit" class="filter-bar">
     <div class="fi"><label for="au-from">起始日期</label>
@@ -33,6 +33,31 @@
     <div class="btn-row"><button type="submit" class="btn btn-sm">查询</button>
     <a href="/admin/audit" class="btn btn-sm btn-secondary">重置</a></div>
   </form>
+</div>
+
+<div class="card" style="margin-top:16px">
+  <h3 style="margin-top:0">保留策略</h3>
+  {% if retention.error %}
+  <p class="muted">保留期信息读取失败：{{ retention.error }}</p>
+  {% else %}
+  <p class="muted">
+    当前最早记录：{{ retention.oldest or "—" }}，最新：{{ retention.newest or "—" }}。
+    {{ retention.days }} 天前共有 <b>{{ retention.auditLogs }}</b> 条操作日志、
+    <b>{{ retention.auditEvents }}</b> 条事件记录（合计 {{ retention.total }} 条）。
+    清理会永久删除这些记录，动作本身会再写一条 PURGE 审计。
+  </p>
+  <form method="post" action="/admin/audit/purge" class="filter-bar"
+        data-confirm="将永久删除 {{ retention.days }} 天前的 {{ retention.total }} 条审计记录，不可撤销。"
+        data-confirm-title="清理审计日志" data-confirm-ok="确认清理" data-confirm-danger="1">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="fi"><label for="au-days">保留天数</label>
+      <input id="au-days" name="days" type="number" min="30" max="3650" value="{{ retention.days }}" style="max-width:110px"></div>
+    <div class="btn-row">
+      <a class="btn btn-sm btn-secondary" href="/admin/audit?retentionDays={{ retention.days }}">重新统计</a>
+      <button type="submit" class="btn btn-sm" {% if retention.total == 0 %}disabled{% endif %}>清理 {{ retention.days }} 天前</button>
+    </div>
+  </form>
+  {% endif %}
 </div>
 
 <div class="table-wrap" style="margin-top:16px">

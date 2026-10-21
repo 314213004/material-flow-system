@@ -135,6 +135,9 @@ internal fun assemblyDeviceRoute(scan: ScanResult): AssemblyDeviceRoute? {
 /** 盘点列表每页条数（0.5.47）。 */
 private const val STOCKTAKE_PAGE_SIZE = 50
 
+/** 订单物料清单每页条数（0.5.48）：大订单一次上万行，手机端拉不动。 */
+private const val ORDER_MATERIAL_PAGE_SIZE = 200
+
 
 data class LogisticsUiState(
     val authState: AuthState = AuthState.Restoring,
@@ -151,6 +154,7 @@ data class LogisticsUiState(
     val materialInventory: MaterialInventory? = null,
     val orderStatus: OrderMaterialStatus? = null,
     val orderDetail: OrderDetail? = null,
+    val materialLoadingMore: Boolean = false,
     val orderResourceId: String? = null,
     val deviceDetail: DeviceDetail? = null,
     /** 机台页聚合数据：装配任务（进度/人员）、物料情况、流转申请、工时。 */
@@ -2818,6 +2822,46 @@ class LogisticsViewModel(
     }
 
     /** Re-reads the selected order only; each order owns its loading/error/content state. */
+    /**
+     * 订单物料清单"加载更多"（0.5.48）：追加下一页并合并。
+     * 齐套率与缺料数都用服务端全量口径，不随已加载条数变化。
+     */
+    fun loadMoreOrderMaterials() {
+        val st = _state.value
+        val status = st.orderStatus ?: return
+        if (!st.loggedIn || st.materialLoadingMore || !status.hasMore) return
+        val orderNo = st.multiOrderSnapshot.selectedOrderNo ?: status.documentNo
+        if (orderNo.isBlank()) return
+        operationScope.launch {
+            _state.update { it.copy(materialLoadingMore = true) }
+            repo.orderMaterialStatus(orderNo, page = status.page + 1, pageSize = ORDER_MATERIAL_PAGE_SIZE)
+                .onSuccess { next ->
+                    _state.update { cur ->
+                        val base = cur.orderStatus
+                        if (base == null || base.documentNo != next.documentNo) {
+                            cur.copy(materialLoadingMore = false)
+                        } else {
+                            val merged = (base.items + next.items)
+                                .distinctBy { (it.deviceId ?: "") + "|" + it.materialId }
+                            cur.copy(
+                                orderStatus = next.copy(items = merged),
+                                materialLoadingMore = false,
+                                error = null,
+                            )
+                        }
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            materialLoadingMore = false,
+                            error = if (e is ApiException) e.safeMessage("加载更多物料失败") else "网络不可用，加载更多物料失败",
+                        )
+                    }
+                }
+        }
+    }
+
     fun refreshOrderDetail() {
         _state.value.multiOrderSnapshot.selectedOrderNo?.let(::refreshOrderDetail)
             ?: _state.value.orderStatus?.documentNo?.let(::refreshOrderDetail)
@@ -2831,7 +2875,7 @@ class LogisticsViewModel(
                 .onSuccess { detail ->
                     // The material-status endpoint is the source of truth for the list;
                     // order detail remains the aggregate source for tasks/timeline.
-                    repo.orderMaterialStatus(orderNo)
+                    repo.orderMaterialStatus(orderNo, page = 1, pageSize = ORDER_MATERIAL_PAGE_SIZE)
                         .onSuccess { materialStatus ->
                     if (!multiOrderDetails.applySuccess(orderNo, requestId, detail)) return@onSuccess
                     _state.update { it.copy(orderDetail = detail, orderStatus = materialStatus, screen = Screen.ORDER_DETAIL, loading = false, error = null, message = "订单详情已更新") }

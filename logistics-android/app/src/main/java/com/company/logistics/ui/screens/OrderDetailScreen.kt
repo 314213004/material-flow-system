@@ -62,6 +62,7 @@ import com.company.logistics.ui.components.AppCard
 import com.company.logistics.ui.components.EmptyState
 import com.company.logistics.ui.components.formatServerTime
 import com.company.logistics.ui.components.SectionTitle
+import com.company.logistics.ui.components.SecondaryButton
 import com.company.logistics.ui.components.StatusTag
 import com.company.logistics.ui.components.tagTextColor
 import com.company.logistics.ui.MultiOrderSnapshot
@@ -100,6 +101,8 @@ fun OrderDetailScreen(
     readOnly: Boolean = false,
     batchSubmitting: Boolean = false,
     onSubmitMaterialBatch: (MaterialBatchSubmission) -> Unit = {},
+    loadingMoreMaterials: Boolean = false,
+    onLoadMoreMaterials: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var selectedDeviceId by remember(status) { mutableStateOf<String?>(null) }
@@ -470,6 +473,16 @@ fun OrderDetailScreen(
 
         if (detail != null) {
             MaterialSummarySection(detail.materialSummary)
+            // detail 存在时展示服务端汇总表；下方仍给出"已加载 N/M 条"的提示，
+            // 让用户知道批量操作只覆盖已加载的物料行。
+            if (status.hasMore) {
+                VSpace(Spacing.sm)
+                Text(
+                    "物料明细已加载 ${status.items.size} / ${status.total} 条（汇总数字为全量）",
+                    fontSize = 12.sp,
+                    color = LogisticsTheme.colors.textSecondary,
+                )
+            }
         } else {
             SectionTitle("物料需求（${status.items.size}）", trailing = "需求 / 到料 / 在库")
             VSpace(Spacing.sm)
@@ -501,6 +514,20 @@ fun OrderDetailScreen(
                         deviceItems.forEach { item -> OrderMaterialRow(item) }
                     }
                     VSpace(Spacing.sm)
+                }
+                // 0.5.48：物料清单分页（每页 200 条），还有就继续往下翻
+                if (status.hasMore) {
+                    Text(
+                        "已显示 ${status.items.size} / ${status.total} 条",
+                        fontSize = 12.sp,
+                        color = LogisticsTheme.colors.textSecondary,
+                    )
+                    VSpace(Spacing.xs)
+                    SecondaryButton(
+                        text = if (loadingMoreMaterials) "加载中…" else "加载更多物料",
+                        onClick = { if (!loadingMoreMaterials) onLoadMoreMaterials() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
                 }
             }
         }

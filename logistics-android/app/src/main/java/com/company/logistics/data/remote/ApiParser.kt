@@ -407,6 +407,7 @@ object ApiParser {
             hasMore = root.optBoolean("hasMore", false),
             summaryRequired = root.optJSONObject("materialSummary")?.let { it.optInt("totalRequiredQuantity") },
             summaryInStock = root.optJSONObject("materialSummary")?.let { it.optInt("totalInStockQuantity") },
+            shortageLineCount = root.optInt("shortageLineCount", -1).takeIf { it >= 0 },
         )
     }
 

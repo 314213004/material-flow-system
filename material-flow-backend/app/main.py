@@ -4369,6 +4369,12 @@ def material_status(
         (order["id"],),
     ).fetchall()
     material_summary = _material_summary_grouped(summary_rows)
+    # 缺料行数（按需求行计数，与端上原来 items.count{OUT_OF_STOCK} 语义一致）。
+    # 分页后端上不能再拿当前页 items 数缺料，必须由服务端按全量给。
+    shortage_line_count = c.execute(
+        "SELECT COUNT(*) FROM order_material_requirements WHERE order_id=? AND status_code='OUT_OF_STOCK'",
+        (order["id"],),
+    ).fetchone()[0]
     c.close()
 
     items = [
@@ -4399,6 +4405,7 @@ def material_status(
         "orderStatus": order["status"],
         "items": items,
         "materialSummary": material_summary,
+        "shortageLineCount": shortage_line_count,
         "total": total,
         "page": page,
         "pageSize": page_size,
@@ -4406,6 +4413,82 @@ def material_status(
         "serverTime": now(),
         "traceId": trace_id,
     }
+
+
+class AuditPurge(BaseModel):
+    """审计日志保留策略执行（0.21.15）。days 下限 30，避免误删近期账。"""
+    days: int = Field(default=365, ge=30, le=3650)
+    dryRun: bool = True
+
+
+def _audit_cutoff(days: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+
+def _audit_retention_counts(c: sqlite3.Connection, cutoff: str) -> dict[str, Any]:
+    logs = c.execute("SELECT COUNT(*) FROM audit_logs WHERE occurred_at < ?", (cutoff,)).fetchone()[0]
+    events = c.execute("SELECT COUNT(*) FROM audit_events WHERE server_time < ?", (cutoff,)).fetchone()[0]
+    oldest = c.execute(
+        "SELECT MIN(ts) FROM (SELECT MIN(occurred_at) ts FROM audit_logs"
+        " UNION ALL SELECT MIN(server_time) FROM audit_events)"
+    ).fetchone()[0]
+    newest = c.execute(
+        "SELECT MAX(ts) FROM (SELECT MAX(occurred_at) ts FROM audit_logs"
+        " UNION ALL SELECT MAX(server_time) FROM audit_events)"
+    ).fetchone()[0]
+    return {"auditLogs": logs, "auditEvents": events, "total": logs + events,
+            "oldest": oldest, "newest": newest}
+
+
+@app.get("/api/v1/admin/audit/retention")
+def audit_retention_preview(
+    days: int = Query(default=365, ge=30, le=3650),
+    user: sqlite3.Row = Depends(current_user),
+) -> dict[str, Any]:
+    """审计日志保留策略预览（只读）：N 天前各表有多少条可清理。"""
+    if user["role"] != "ADMIN":
+        raise ApiError(403, CODE_FORBIDDEN, "无审计权限")
+    cutoff = _audit_cutoff(days)
+    c = db()
+    try:
+        counts = _audit_retention_counts(c, cutoff)
+    finally:
+        c.close()
+    return {"days": days, "cutoff": cutoff, **counts, "serverTime": now()}
+
+
+@app.post("/api/v1/admin/audit/purge")
+def audit_purge(
+    body: AuditPurge,
+    user: sqlite3.Row = Depends(current_user),
+    x_request_id: str | None = Header(default=None),
+) -> dict[str, Any]:
+    """按保留期清理审计日志；dryRun=true 只返回将被清理的条数。
+
+    清理动作自身也写一条审计（清理后写，因此不会被本次清掉），保证“谁在什么时候
+    删了多少”可追溯。
+    """
+    if user["role"] != "ADMIN":
+        raise ApiError(403, CODE_FORBIDDEN, "无审计权限")
+    trace_id = x_request_id or ""
+    cutoff = _audit_cutoff(body.days)
+    c = db()
+    try:
+        counts = _audit_retention_counts(c, cutoff)
+        if body.dryRun:
+            return {"dryRun": True, "days": body.days, "cutoff": cutoff, **counts,
+                    "deleted": 0, "serverTime": now()}
+        deleted_logs = c.execute("DELETE FROM audit_logs WHERE occurred_at < ?", (cutoff,)).rowcount
+        deleted_events = c.execute("DELETE FROM audit_events WHERE server_time < ?", (cutoff,)).rowcount
+        audit(c, user["id"], user["role"], "PURGE", "AUDIT_LOG", f"retention-{body.days}d",
+              request_id=trace_id)
+        c.commit()
+    finally:
+        c.close()
+    return {"dryRun": False, "days": body.days, "cutoff": cutoff,
+            "before": counts, "deleted": {"auditLogs": deleted_logs, "auditEvents": deleted_events,
+                                          "total": deleted_logs + deleted_events},
+            "serverTime": now()}
 
 
 @app.get("/api/v1/orders/{order_no}/detail")

@@ -106,3 +106,31 @@ def test_audit_time_validation():
         bad = client.get("/admin/audit?from=not-a-time")
         assert bad.status_code == 200
         assert "必须是合法 ISO-8601 时间" in bad.text
+
+
+def test_audit_retention_card_and_purge_button():
+    """审计页要有保留期卡片；清理按钮 POST 后按保留期删老数据并回跳。"""
+    c = backend.db()
+    c.execute(
+        "INSERT INTO audit_logs(operator_id,role,action,resource_type,resource_id,"
+        "request_id,occurred_at,result) VALUES(?,?,?,?,?,?,?,?)",
+        ("u_admin", "ADMIN", "LOGIN_SUCCESS", "SESSION", "sess_old", "req-old",
+         "2024-01-01T00:00:00+00:00", "SUCCESS"),
+    )
+    c.commit()
+    c.close()
+    with TestClient(backend.app) as client:
+        assert web_login(client, "owlco", "Admin@2026").status_code == 303
+        page = client.get("/admin/audit?retentionDays=365")
+        assert page.status_code == 200
+        assert "保留策略" in page.text
+        assert "清理 365 天前" in page.text
+        token = form_csrf(page.text)
+        r = client.post("/admin/audit/purge", data={"days": "365", "csrf_token": token},
+                        follow_redirects=False)
+        assert r.status_code == 303, r.text[:200]
+        assert "notice=audit_purged" in r.headers["location"]
+        c = backend.db()
+        assert c.execute("SELECT COUNT(*) FROM audit_logs WHERE resource_id='sess_old'").fetchone()[0] == 0
+        assert c.execute("SELECT COUNT(*) FROM audit_logs WHERE action='PURGE'").fetchone()[0] == 1
+        c.close()

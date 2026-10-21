@@ -52,6 +52,9 @@ from app.main import (
     add_employee,
     approve as api_approve,
     audit_logs as api_audit_logs,
+    audit_retention_preview as api_audit_retention,
+    audit_purge as api_audit_purge,
+    AuditPurge as ApiAuditPurge,
     commit_bom_import as api_bom_commit,
     audit,
     check_password,
@@ -417,6 +420,7 @@ NOTICE_TEXTS = {
     "rejected": "申请已驳回",
     "executed": "出库执行完成，库存已变更",
     "stocktake_confirmed": "盘点已确认",
+    "audit_purged": "审计日志已按保留期清理",
     "exception_reviewed": "异常已审核",
     "assigned": "任务成员已分配",
     "unassigned": "任务成员已移除",
@@ -1623,6 +1627,41 @@ def _audit_entity_names(c: sqlite3.Connection, items: list[dict]) -> dict[str, s
     return out
 
 
+def _audit_retention_ctx(request: Request, user: sqlite3.Row) -> dict:
+    """审计页顶部的保留期卡片数据（默认 365 天，失败不影响列表）。"""
+    try:
+        days = int(request.query_params.get("retentionDays") or 365)
+    except ValueError:
+        days = 365
+    days = max(30, min(days, 3650))
+    try:
+        data = api_audit_retention(days=days, user=user)
+    except (HTTPException, ApiError) as exc:
+        return {"days": days, "error": getattr(exc, "detail", str(exc)), "total": 0}
+    return {**data, "error": None}
+
+
+@router.post("/admin/audit/purge")
+async def admin_audit_purge(request: Request):
+    """按保留期清理审计日志（仅 ADMIN，需 CSRF）。"""
+    user, denied = _admin_or_403(request)
+    if denied:
+        return denied
+    form = await request.form()
+    if not _csrf_ok(str(form.get("csrf_token", "")), user["csrf_token"]):
+        return _error_page(request, 400, "CSRF 校验失败，请刷新页面重试")
+    try:
+        days = int(str(form.get("days") or 365))
+    except ValueError:
+        return _error_page(request, 400, "保留天数必须是整数")
+    try:
+        api_audit_purge(ApiAuditPurge(days=days, dryRun=False), user=user,
+                        x_request_id=str(uuid.uuid4()))
+    except (ApiError, ValidationError) as exc:
+        return _error_page(request, 400, _api_error_message(exc))
+    return _see_other(f"/admin/audit?retentionDays={days}&notice=audit_purged")
+
+
 @router.get("/admin/audit", response_class=HTMLResponse)
 def admin_audit_logs(request: Request):
     user, denied = _admin_or_403(request)
@@ -1697,6 +1736,8 @@ def admin_audit_logs(request: Request):
             "entity_labels": _ui_labels.LABELS["entity"],
             "result_labels": _ui_labels.LABELS["result"],
             "role_labels": ROLE_LABELS,
+            "retention": _audit_retention_ctx(request, user),
+            "notice_text": NOTICE_TEXTS.get(request.query_params.get("notice") or ""),
         },
     )
 
