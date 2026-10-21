@@ -10,7 +10,7 @@
 | 项 | 值 |
 |----|-----|
 | 主仓库 | GitHub `owlco001/material-flow-system`（镜像 Gitee `owlco001/material-flow-system`），主干 `main` |
-| 基线 | 后端 **0.21.16**、App **0.5.48**（versionCode 55），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
+| 基线 | 后端 **0.21.16**、App **0.5.49**（versionCode 56），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
 | 生产 | `jsby@221.231.106.194:5556` 的 `/srv/material-flow`（systemd `material-flow.service`，cloudflared 221）；更新用 `sudo -n /bin/bash /srv/material-flow/deploy/update.sh`（含 DB 热备 + 失败自动回滚） |
 | 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **512 passed**，约 3.5 分钟 |
 | App 测试 | `cd logistics-android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest` → **206 例 0 失败**；发版 `:app:assembleRelease` |
@@ -25,6 +25,7 @@
 - 审批页详情改为在当张卡片下展开；U9 库存同步把已清零/不再返回的库位归零
 - 新增只读巡检 `GET /api/v1/inventory/consistency`（ADMIN/仓管）对账 `materials.total_quantity` 与 `sum(inventory.quantity)`
 - 盘点 / 异常列表分页（`page`/`pageSize`/`total`），App 盘点页每页 50 条 + 「加载更多」
+- App 0.5.49 物料分页改触底自动加载（不再需要滚到底点按钮），按钮保留为兜底
 - App 0.5.48 订单页物料清单开分页（每页 200 + 「加载更多物料」），齐套率/缺料数全走服务端
   （`shortageLineCount`）；`detail.materialSummary` 口径不变
 - APP 更新通道加固：服务重启后自动把“下载中”收尾为失败并清半截 .part（现场“卡 45%”的根因），新增取消同步（接口 + 管理台按钮）、下载停滞 90 秒放弃、运维 CLI `python -m app.app_sync`

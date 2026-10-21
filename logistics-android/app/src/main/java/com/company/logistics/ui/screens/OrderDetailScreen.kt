@@ -30,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -151,10 +152,24 @@ fun OrderDetailScreen(
         )
         return
     }
+    // 触底自动加载（"智能分页"）：不用点按钮，滚到接近底部就自动取下一页。
+    // 距底部 600px 内触发，配合 loadingMore 去重，避免重复请求。
+    val scrollState = rememberScrollState()
+    val nearBottom by remember {
+        derivedStateOf {
+            val max = scrollState.maxValue
+            max > 0 && scrollState.value >= max - 600
+        }
+    }
+    LaunchedEffect(nearBottom, status?.items?.size, status?.hasMore, loadingMoreMaterials) {
+        if (nearBottom && status?.hasMore == true && !loadingMoreMaterials) {
+            onLoadMoreMaterials()
+        }
+    }
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .verticalScroll(rememberScrollState())
+            .verticalScroll(scrollState)
             .padding(horizontal = Dimens.PagePadding)
     ) {
         Spacer(Modifier.height(Spacing.sm))
@@ -515,16 +530,17 @@ fun OrderDetailScreen(
                     }
                     VSpace(Spacing.sm)
                 }
-                // 0.5.48：物料清单分页（每页 200 条），还有就继续往下翻
+                // 0.5.49：物料分页改成触底自动加载；按钮只作兜底（自动加载失败时手点）
                 if (status.hasMore) {
                     Text(
-                        "已显示 ${status.items.size} / ${status.total} 条",
+                        if (loadingMoreMaterials) "正在加载更多物料…（已显示 ${status.items.size} / ${status.total} 条）"
+                        else "继续下滑自动加载（已显示 ${status.items.size} / ${status.total} 条）",
                         fontSize = 12.sp,
                         color = LogisticsTheme.colors.textSecondary,
                     )
                     VSpace(Spacing.xs)
                     SecondaryButton(
-                        text = if (loadingMoreMaterials) "加载中…" else "加载更多物料",
+                        text = if (loadingMoreMaterials) "加载中…" else "立即加载下一页",
                         onClick = { if (!loadingMoreMaterials) onLoadMoreMaterials() },
                         modifier = Modifier.fillMaxWidth(),
                     )
