@@ -1,18 +1,36 @@
 # NEXT.md — 交接看板
 
 > 给下一个对话用。**不要复述上下文，读这个文件即可。**
-> 最后更新：2026-10-14（下方第 0–6 节为 2026-09 的历史记录，部分分支/HEAD/测试数已过时，以本节为准）
+> 最后更新：2026-10-21（下方更早的 0–6 节为历史记录，版本/测试数已过时，以本节为准）
 
 ---
 
-## ★ 最新状态（2026-10-14）
+## ★ 最新状态（2026-10-21）
 
 | 项 | 值 |
 |----|-----|
-| 主仓库 | GitHub `owlco001/material-flow-system`（用户 fork：`314213004/material-flow-system`），主干 `main` |
-| 基线 | `main` @ `57afd9f`：后端 **0.13.0**（清除演示/测试数据，#40），App **0.5.38**（versionCode 45） |
-| 本轮 | 分支 `feature/batch-material-ops`：后端 **0.14.0**、App **0.5.39**（versionCode 46） |
-| 后端测试 | `cd material-flow-backend && python3 -m pytest tests/ -q -p no:cacheprovider` → 437 passed（基线 431 + 新增 6），约 3.5 分钟 |
+| 主仓库 | GitHub `owlco001/material-flow-system`（镜像 Gitee `owlco001/material-flow-system`），主干 `main` |
+| 基线 | 后端 **0.21.10**、App **0.5.46**（versionCode 53），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
+| 生产 | `jsby@221.231.106.194:5556` 的 `/srv/material-flow`（systemd `material-flow.service`，cloudflared 221）；更新用 `sudo -n /bin/bash /srv/material-flow/deploy/update.sh`（含 DB 热备 + 失败自动回滚） |
+| 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **493 passed**，约 3.5 分钟 |
+| App 测试 | `cd logistics-android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest` → **198 例 0 失败**；发版 `:app:assembleRelease` |
+| 门禁 | `python3 scripts/check_emoji_icons.py` 必须 PASS（75 个 .kt） |
+
+**2026-10-20～21 这一批已完成**（都已在 221 上线 / 双端 Release）
+- 批次一 P2：离线解包误判、损坏静默成功、跨订单测试、SQL 别名改写
+- 装配工物料可见性：关联键改机台号 `device_no` 并纳入协作成员（U9/报价导入订单原来物料恒空）
+- 主管统计按车间收敛（`user_workshops`，未配置=全厂）+ 订单维度进度（`/workshop/order-progress`、订单详情 `progress`）
+- App：离线队列退避重试上限（30s~4min、5 次转终态）、图片凭证拍照/相册（含离线入队）、盘点页（含离线）
+- 盘点确认真正调整库存 + 创建校验库位并落真实 id；异常审批通过按差异校正库存（可指定库位，未指定按单库位/最大库位）
+- 审批页详情改为在当张卡片下展开；U9 库存同步把已清零/不再返回的库位归零
+- 新增只读巡检 `GET /api/v1/inventory/consistency`（ADMIN/仓管）对账 `materials.total_quantity` 与 `sum(inventory.quantity)`
+
+**已知未决**
+- U9 库存同步长期"全部不变"（行数恒 9643）：已记录核查 SQL，疑 U9 侧 `InvTrans_WhQoh` 未刷新，待现场结论
+- 库存数量仍只存整数（78.65→79；变化 <0.5 判不变）——要动表结构 + API 契约 + App 显示，需单独立项
+- `docs/物流流转系统-当前实现架构复核.md` 里"execute_transfer 未更新汇总/未用乐观锁"等条目已过时
+
+---
 
 **本轮功能：订单页 / 机台页物料勾选批量操作**（出库申请 / 退料 / 厂内调拨 / 异常提报）
 - 后端：流转类型新增 `RETURN`（退料，按入库审批规则）；`TRANSFER`（厂内调拨）创建时强制来源+目标库位、限定角色，

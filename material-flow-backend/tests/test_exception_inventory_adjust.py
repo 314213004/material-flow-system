@@ -142,3 +142,61 @@ def test_idempotent_replay_does_not_double_adjust():
         total = c.execute("SELECT total_quantity FROM materials WHERE id='m1'").fetchone()[0]
         c.close()
         assert total == 98, "幂等重放不能把差异再调一次"
+
+
+def test_approve_with_chosen_location_adjusts_that_location():
+    """审批人指定库位时，只调该库位（多库位场景不再按最大行猜）。"""
+    seed(material_qty=100, locations=(("loc-a", "A-01", 60), ("loc-b", "A-02", 40)))
+    with TestClient(backend.app) as client:
+        token = login(client, "wh-admin", "Wh@2026x")
+        eid = create_exception(client, token, 10, 5)   # 差 -5
+        r = client.post(f"/api/v1/exceptions/{eid}/review",
+                        json={"decision": "APPROVE", "clientOperationId": str(uuid.uuid4()),
+                              "locationCode": "A-02"}, headers=H(token))
+        assert r.status_code == 200, r.text
+        adj = r.json()["adjusted"]
+        assert adj["locationChosen"] is True and adj["locationId"] == "loc-b"
+        c = backend.db()
+        rows = dict(c.execute("SELECT location_id, quantity FROM inventory WHERE material_id='m1'").fetchall())
+        total = c.execute("SELECT total_quantity FROM materials WHERE id='m1'").fetchone()[0]
+        c.close()
+        assert rows == {"loc-a": 60, "loc-b": 35}
+        assert total == 95 == sum(rows.values())
+
+
+def test_approve_with_chosen_location_creates_missing_row():
+    """指定的库位还没有库存行时按差异新建，保证汇总 = 明细合计。"""
+    seed(material_qty=100, locations=(("loc-a", "A-01", 100),))
+    with TestClient(backend.app) as client:
+        token = login(client, "wh-admin", "Wh@2026x")
+        c = backend.db()
+        c.execute("INSERT OR IGNORE INTO locations(id, code, name) VALUES('loc-c','C-03','三号库位')")
+        c.commit(); c.close()
+        eid = create_exception(client, token, 10, 13)   # 差 +3
+        r = client.post(f"/api/v1/exceptions/{eid}/review",
+                        json={"decision": "APPROVE", "clientOperationId": str(uuid.uuid4()),
+                              "locationCode": "C-03"}, headers=H(token))
+        assert r.status_code == 200, r.text
+        c = backend.db()
+        rows = dict(c.execute("SELECT location_id, quantity FROM inventory WHERE material_id='m1'").fetchall())
+        total = c.execute("SELECT total_quantity FROM materials WHERE id='m1'").fetchone()[0]
+        c.close()
+        assert rows == {"loc-a": 100, "loc-c": 3}
+        assert total == 103 == sum(rows.values())
+
+
+def test_approve_with_unknown_location_is_rejected():
+    seed()
+    with TestClient(backend.app) as client:
+        token = login(client, "wh-admin", "Wh@2026x")
+        eid = create_exception(client, token, 10, 8)
+        r = client.post(f"/api/v1/exceptions/{eid}/review",
+                        json={"decision": "APPROVE", "clientOperationId": str(uuid.uuid4()),
+                              "locationCode": "NOPE-9"}, headers=H(token))
+        assert r.status_code == 400, r.text
+        assert "库位不存在" in r.text
+        c = backend.db()
+        status = c.execute("SELECT status FROM exceptions WHERE id=?", (eid,)).fetchone()[0]
+        total = c.execute("SELECT total_quantity FROM materials WHERE id='m1'").fetchone()[0]
+        c.close()
+        assert status == "PENDING" and total == 100, "库位非法时整单回滚，状态与库存都不能变"

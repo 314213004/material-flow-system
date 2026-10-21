@@ -61,6 +61,7 @@ a.todo-card.todo-warn .stat-num { color: var(--warn); }
           <option value="APPROVE">通过</option>
           <option value="REJECT">驳回</option>
         </select>
+        <input name="locationCode" placeholder="库位(可选)" style="max-width:110px" title="通过时校正到该库位；不填按单库位/最大库位校正">
         <button type="submit" class="btn btn-sm">提交</button>
       </form>
       {% else %}—{% endif %}

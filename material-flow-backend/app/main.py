@@ -1424,6 +1424,8 @@ class Decision(BaseModel):
     decision: str
     comment: str = ""
     clientOperationId: uuid.UUID | None = None
+    # 异常审批通过时可选指定校正哪个库位（异常单本身不带库位，多库位时由审批人决定）
+    locationCode: str | None = Field(default=None, max_length=64)
 
 
 class LocationBindingCreate(BaseModel):
@@ -7180,6 +7182,55 @@ def bind_location(
     return {"bindingId": bid, "status": "BOUND", "serverTime": now()}
 
 
+@app.get("/api/v1/inventory/consistency")
+def inventory_consistency(
+    limit: int = Query(default=200, ge=1, le=2000),
+    user: sqlite3.Row = Depends(current_user),
+) -> dict[str, Any]:
+    """库存一致性巡检（只读，0.21.10）。
+
+    列出 `materials.total_quantity` 与 `sum(inventory.quantity)` 不一致的料号，
+    用于发现历史漂移（流转执行 / 盘点确认 / 异常审批 / U9 同步多条写入路径留下的差）。
+    只读，不改任何数据。
+    """
+    if user["role"] not in {"ADMIN", "WAREHOUSE_ADMIN"}:
+        raise ApiError(403, CODE_FORBIDDEN, "无权查看库存一致性")
+    c = db()
+    try:
+        base = ("SELECT m.id AS id, m.code AS code, m.name AS name, m.total_quantity AS total,"
+                " COALESCE(SUM(i.quantity),0) AS inv_sum"
+                "  FROM materials m LEFT JOIN inventory i ON i.material_id=m.id"
+                " GROUP BY m.id HAVING m.total_quantity <> COALESCE(SUM(i.quantity),0)")
+        total_mismatch = c.execute(f"SELECT COUNT(*) FROM ({base})").fetchone()[0]
+        total_materials = c.execute("SELECT COUNT(*) FROM materials").fetchone()[0]
+        rows = c.execute(base + " ORDER BY ABS(m.total_quantity - COALESCE(SUM(i.quantity),0)) DESC,"
+                                        " m.code LIMIT ?", (limit,)).fetchall()
+        ids = [r["id"] for r in rows]
+        locs: dict[str, list[dict[str, Any]]] = {}
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            for loc in c.execute(
+                "SELECT i.material_id AS mid, l.code AS loc_code, i.quantity AS qty"
+                "  FROM inventory i LEFT JOIN locations l ON l.id=i.location_id"
+                f" WHERE i.material_id IN ({marks}) ORDER BY l.code", ids
+            ).fetchall():
+                locs.setdefault(loc["mid"], []).append(
+                    {"locationCode": loc["loc_code"], "quantity": loc["qty"]})
+        items = [{
+            "materialId": r["id"], "materialCode": r["code"], "materialName": r["name"],
+            "totalQuantity": r["total"], "inventorySum": r["inv_sum"],
+            "difference": int(r["total"]) - int(r["inv_sum"]),
+            "locations": locs.get(r["id"], []),
+        } for r in rows]
+        return {
+            "summary": {"materials": total_materials, "mismatched": total_mismatch,
+                        "shown": len(items), "limit": limit},
+            "items": items, "serverTime": now(),
+        }
+    finally:
+        c.close()
+
+
 @app.post("/api/v1/stocktakes")
 def create_stocktake(
     body: StocktakeCreate,
@@ -7356,13 +7407,15 @@ def exceptions_page(c: sqlite3.Connection, limit: int, offset: int) -> list[dict
     return [dict(r) for r in rows]
 
 
-def _apply_exception_adjustment(c: sqlite3.Connection, eid: str) -> dict[str, Any] | None:
+def _apply_exception_adjustment(c: sqlite3.Connection, eid: str,
+                                location_code: str | None = None) -> dict[str, Any] | None:
     """把异常单的差异落到库存上（审批通过时调用）。
 
     - 无物料或无差异：不动，返回说明；
-    - 该料号只有一条库位库存：直接调整那条，再按库存表重算汇总，保证"汇总 = 明细合计"；
-    - 多条库位（异常单没有库位字段，无法归属）：调整数量最大的那条并回报库位 id，
-      保证不变式成立，具体货位由盘点再细化。
+    - 审批人指定了库位（locationCode）：只调整该库位（没有库存行就先建），再按库存表重算汇总；
+    - 未指定且只有一条库位库存：直接调整那条，保证"汇总 = 明细合计"；
+    - 未指定且多条库位：调整数量最大的那条并回报库位 id（保证不变式成立），
+      建议审批人下次直接指定库位。
     """
     ex = c.execute("SELECT material_id, book_quantity, actual_quantity, difference"
                    "  FROM exceptions WHERE id=?", (eid,)).fetchone()
@@ -7375,21 +7428,39 @@ def _apply_exception_adjustment(c: sqlite3.Connection, eid: str) -> dict[str, An
     if not mat:
         return {"adjusted": False, "reason": "物料不存在"}
     before = int(mat["total_quantity"])
-    rows = c.execute("SELECT id, location_id, quantity FROM inventory WHERE material_id=?"
-                     " ORDER BY quantity DESC, id", (mat["id"],)).fetchall()
     location_id = None
-    if rows:
-        target = rows[0]
-        c.execute("UPDATE inventory SET quantity=? WHERE id=?",
-                  (max(0, int(target["quantity"]) + diff), target["id"]))
-        location_id = target["location_id"]
+    chosen = (location_code or "").strip()
+    if chosen:
+        loc = c.execute("SELECT id FROM locations WHERE code=?", (chosen,)).fetchone()
+        if not loc:
+            raise ApiError(400, CODE_VALIDATION_ERROR, f"库位不存在：{chosen}")
+        location_id = loc["id"]
+        target = c.execute("SELECT id, quantity FROM inventory WHERE material_id=? AND location_id=?",
+                           (mat["id"], location_id)).fetchone()
+        if target:
+            c.execute("UPDATE inventory SET quantity=? WHERE id=?",
+                      (max(0, int(target["quantity"]) + diff), target["id"]))
+        else:
+            c.execute("INSERT INTO inventory(id, material_id, location_id, quantity) VALUES(?,?,?,?)",
+                      (f"inv-ex-{uuid.uuid4().hex}", mat["id"], location_id, max(0, diff)))
         after = int(c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE material_id=?",
                               (mat["id"],)).fetchone()[0])
     else:
-        after = max(0, before + diff)
+        rows = c.execute("SELECT id, location_id, quantity FROM inventory WHERE material_id=?"
+                         " ORDER BY quantity DESC, id", (mat["id"],)).fetchall()
+        if rows:
+            target = rows[0]
+            c.execute("UPDATE inventory SET quantity=? WHERE id=?",
+                      (max(0, int(target["quantity"]) + diff), target["id"]))
+            location_id = target["location_id"]
+            after = int(c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE material_id=?",
+                                  (mat["id"],)).fetchone()[0])
+        else:
+            after = max(0, before + diff)
     c.execute("UPDATE materials SET total_quantity=?, available_quantity=MAX(0,available_quantity+?),"
               " version=version+1 WHERE id=?", (after, diff, mat["id"]))
     return {"adjusted": True, "materialId": mat["id"], "locationId": location_id,
+            "locationCode": chosen or None, "locationChosen": bool(chosen),
             "before": before, "after": after, "difference": diff,
             "locationAdjusted": location_id is not None}
 
@@ -7424,7 +7495,8 @@ def review_exception(
             _conflict("异常状态不允许审批", trace_id)
         # 0.21.9：异常审批通过即按「实盘 - 账面」校正库存（拒绝不动），
         # 否则异常单只是记录，账实依旧不一致（与盘点确认同口径）。
-        adjusted = _apply_exception_adjustment(c, eid) if status == "APPROVED" else None
+        adjusted = (_apply_exception_adjustment(c, eid, body.locationCode)
+                    if status == "APPROVED" else None)
         audit(c, user["id"], user["role"], "REVIEW", "EXCEPTION", eid, request_id=trace_id)
         result = {"exceptionId": eid, "status": status, "traceId": trace_id, "adjusted": adjusted}
         c.execute("INSERT INTO exception_operations VALUES(?,?,?,?,?,?)", (operation, eid, "REVIEW", payload, json.dumps(result, ensure_ascii=False), reviewed_at))
