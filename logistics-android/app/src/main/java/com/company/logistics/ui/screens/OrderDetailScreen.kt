@@ -161,8 +161,10 @@ fun OrderDetailScreen(
             max > 0 && scrollState.value >= max - 600
         }
     }
-    LaunchedEffect(nearBottom, status?.items?.size, status?.hasMore, loadingMoreMaterials) {
-        if (nearBottom && status?.hasMore == true && !loadingMoreMaterials) {
+    // 只在"明细列表"分支自动翻页。detail 存在时页面显示的是服务端汇总表，
+    // 那时候滚到底不该把 2 万行明细全部偷偷拉下来（每页 0.8MB，滚到底会拉几十兆）。
+    LaunchedEffect(nearBottom, status?.items?.size, status?.hasMore, loadingMoreMaterials, detail) {
+        if (detail == null && nearBottom && status?.hasMore == true && !loadingMoreMaterials) {
             onLoadMoreMaterials()
         }
     }
