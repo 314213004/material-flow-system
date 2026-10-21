@@ -400,7 +400,13 @@ object ApiParser {
             serverTime = root.optString("serverTime").takeIf { it.isNotBlank() },
             orderId = nullableString(root, "orderId"),
             productName = nullableString(root, "productName"),
-            orderStatus = nullableString(root, "orderStatus")
+            orderStatus = nullableString(root, "orderStatus"),
+            total = root.optInt("total", items.size),
+            page = root.optInt("page", 1),
+            pageSize = root.optInt("pageSize", 0),
+            hasMore = root.optBoolean("hasMore", false),
+            summaryRequired = root.optJSONObject("materialSummary")?.let { it.optInt("totalRequiredQuantity") },
+            summaryInStock = root.optJSONObject("materialSummary")?.let { it.optInt("totalInStockQuantity") },
         )
     }
 

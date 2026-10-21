@@ -400,14 +400,23 @@ data class OrderMaterialStatus(
     val serverTime: String?,
     val orderId: String? = null,
     val productName: String? = null,
-    val orderStatus: String? = null
+    val orderStatus: String? = null,
+    /** 0.5.48：物料清单分页；total=0 表示服务端未提供（老版本），按当前页算。 */
+    val total: Int = 0,
+    val page: Int = 1,
+    val pageSize: Int = 0,
+    val hasMore: Boolean = false,
+    /** 服务端汇总（全量口径）。分页时不能用当前页求和算齐套率。 */
+    val summaryRequired: Int? = null,
+    val summaryInStock: Int? = null,
 ) {
-    /** 齐套率：已入库数量 / 需求数量 */
+    /** 齐套率：已入库数量 / 需求数量（优先用服务端全量汇总） */
     val fulfillmentRate: Float
         get() {
-            val required = items.sumOf { it.requiredQuantity }
+            val required = summaryRequired ?: items.sumOf { it.requiredQuantity }
             if (required <= 0) return 0f
-            return (items.sumOf { it.inStockQuantity }.toFloat() / required).coerceIn(0f, 1f)
+            val inStock = summaryInStock ?: items.sumOf { it.inStockQuantity }
+            return (inStock.toFloat() / required).coerceIn(0f, 1f)
         }
 
     /** 缺料物料数量 */

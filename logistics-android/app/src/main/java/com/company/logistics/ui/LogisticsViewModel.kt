@@ -135,6 +135,7 @@ internal fun assemblyDeviceRoute(scan: ScanResult): AssemblyDeviceRoute? {
 /** 盘点列表每页条数（0.5.47）。 */
 private const val STOCKTAKE_PAGE_SIZE = 50
 
+
 data class LogisticsUiState(
     val authState: AuthState = AuthState.Restoring,
 

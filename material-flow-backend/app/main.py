@@ -4269,7 +4269,8 @@ def set_order_status(
         return result
 @app.post("/api/v1/orders/material-status")
 def material_status(
-    body: dict[str, str],
+    # page/pageSize 允许数字或字符串：App 用 JSON 数字、curl/表单用字符串，都接
+    body: dict[str, str | int],
     user: sqlite3.Row = Depends(current_user),
     x_request_id: str | None = Header(default=None),
 ) -> dict[str, Any]:
@@ -4317,6 +4318,20 @@ def material_status(
             "订单不存在", trace_id=trace_id,
         )
 
+    # 0.21.14：物料清单分页（大订单一次上万行，手机端拉不动）。
+    # body 是 dict[str,str]，分页参数按字符串传，非法值退回默认。
+    try:
+        page = int(body.get("page") or 1)
+        page_size = int(body.get("pageSize") or 0)
+    except (TypeError, ValueError):
+        c.close()
+        raise ApiError(400, CODE_VALIDATION_ERROR, "分页参数必须是整数", trace_id=trace_id)
+    if page < 1 or not 0 <= page_size <= 500:
+        c.close()
+        raise ApiError(400, CODE_VALIDATION_ERROR, "分页参数不合法", trace_id=trace_id)
+
+    total = c.execute("SELECT COUNT(*) FROM order_material_requirements WHERE order_id=?",
+                      (order["id"],)).fetchone()[0]
     rows = c.execute(
         """
         SELECT r.id            AS requirement_id,
@@ -4339,9 +4354,21 @@ def material_status(
         LEFT JOIN order_devices d ON d.id = r.device_id
         WHERE r.order_id = ?
         ORDER BY COALESCE(d.sequence_no, 0), m.code
-        """,
+        """ + (" LIMIT ? OFFSET ?" if page_size else ""),
+        ((order["id"], page_size, (page - 1) * page_size) if page_size else (order["id"],)),
+    ).fetchall()
+    # 汇总始终按全量算（不受分页影响），否则齐套率会随翻页变化。
+    summary_rows = c.execute(
+        """SELECT r.material_id AS material_id, m.code AS material_code,
+                  m.name AS material_name, m.unit AS unit,
+                  SUM(r.required_quantity) AS required_quantity,
+                  SUM(r.arrived_quantity) AS arrived_quantity,
+                  SUM(r.in_stock_quantity) AS in_stock_quantity
+             FROM order_material_requirements r JOIN materials m ON m.id = r.material_id
+            WHERE r.order_id=? GROUP BY r.material_id ORDER BY m.code""",
         (order["id"],),
     ).fetchall()
+    material_summary = _material_summary_grouped(summary_rows)
     c.close()
 
     items = [
@@ -4371,7 +4398,11 @@ def material_status(
         "productName": order["product_name"],
         "orderStatus": order["status"],
         "items": items,
-        "materialSummary": _material_summary(rows),
+        "materialSummary": material_summary,
+        "total": total,
+        "page": page,
+        "pageSize": page_size,
+        "hasMore": bool(page_size) and page * page_size < total,
         "serverTime": now(),
         "traceId": trace_id,
     }

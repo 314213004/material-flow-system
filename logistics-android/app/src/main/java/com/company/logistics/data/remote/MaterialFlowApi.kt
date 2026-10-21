@@ -408,11 +408,18 @@ open class MaterialFlowApi(
 
     suspend fun orderMaterialStatus(
         documentType: String,
-        documentNo: String
+        documentNo: String,
+        page: Int = 1,
+        pageSize: Int = 0,
     ): OrderMaterialStatus = withContext(Dispatchers.IO) {
+        require(page >= 1 && pageSize >= 0) { "分页参数不合法" }
         val body = JSONObject().apply {
             put("documentType", documentType)
             put("documentNo", documentNo)
+            if (pageSize > 0) {
+                put("page", page)
+                put("pageSize", pageSize)
+            }
         }
         ApiParser.parseOrderMaterialStatus(
             request("POST", "/api/v1/orders/material-status", body.toString())
