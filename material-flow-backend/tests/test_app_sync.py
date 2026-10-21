@@ -158,3 +158,57 @@ def test_admin_page_check_and_sync(env, monkeypatch):
         assert client.get("/api/v1/app/updates/latest").json()["versionCode"] == 46
         bad = client.post("/admin/releases/sync", data={"csrf_token": "x", "source": "github"})
         assert bad.status_code == 403
+
+
+def test_recover_interrupted_marks_failed_and_drops_part(env, tmp_path):
+    """服务重启把 daemon 线程杀掉后，状态不能永远停在"下载中 45%"。"""
+    rel = tmp_path / "rel"
+    rel.mkdir(parents=True, exist_ok=True)
+    (rel / ".sync-54.part").write_bytes(b"x" * 1024)
+    (rel / ".sync-status.json").write_text(json.dumps({
+        "source": "github", "tag": "v0.5.47", "versionCode": 54, "versionName": "0.5.47",
+        "actor": "owlco", "state": "downloading", "bytes": 11010048, "total": 24389193,
+        "at": "2026-10-21T15:40:29+00:00"}, ensure_ascii=False), encoding="utf-8")
+    out = app_sync.recover_interrupted()
+    assert out["state"] == "failed"
+    st = app_sync.get_status()
+    assert st["state"] == "failed"
+    assert "服务重启导致同步中断" in st["error"]
+    assert "45%" in st["error"], st["error"]
+    assert not list(rel.glob(".sync-*.part")), "半截 part 必须删掉"
+
+
+def test_recover_interrupted_noop_when_idle(env):
+    assert app_sync.recover_interrupted() is None
+
+
+def test_cancel_marks_cancelled_when_no_thread(env, tmp_path):
+    rel = tmp_path / "rel"
+    rel.mkdir(parents=True, exist_ok=True)
+    (rel / ".sync-54.part").write_bytes(b"x" * 10)
+    (rel / ".sync-status.json").write_text(json.dumps({
+        "source": "gitee", "tag": "v0.5.47", "versionCode": 54, "versionName": "0.5.47",
+        "state": "downloading", "bytes": 10, "total": 100}), encoding="utf-8")
+    out = app_sync.cancel_sync("tester")
+    assert out["cancelled"] is True
+    assert app_sync.get_status()["state"] == "cancelled"
+    assert not list(rel.glob(".sync-*.part"))
+
+
+def test_sync_cancel_api(env):
+    from tests.test_admin_web_nav import seed as seed_users
+    seed_users()
+    with TestClient(backend.app) as client:
+        r = client.post("/api/v1/auth/login", json={"username": "owlco", "password": "Admin@2026",
+                                                   "deviceId": "t"})
+        assert r.status_code == 200, r.text
+        token = r.json()["accessToken"]
+        h = {"Authorization": f"Bearer {token}"}
+        idle = client.post("/api/v1/admin/app/releases/sync/cancel", headers=h).json()
+        assert idle["cancelled"] is False, "空闲时取消不应报错"
+    with TestClient(backend.app) as client:
+        r = client.post("/api/v1/auth/login", json={"username": "wh-admin", "password": "Wh@2026x",
+                                                   "deviceId": "t"})
+        if r.status_code == 200:
+            h2 = {"Authorization": f"Bearer {r.json()['accessToken']}"}
+            assert client.post("/api/v1/admin/app/releases/sync/cancel", headers=h2).status_code == 403

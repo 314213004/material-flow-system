@@ -421,6 +421,7 @@ NOTICE_TEXTS = {
     "executed": "出库执行完成，库存已变更",
     "stocktake_confirmed": "盘点已确认",
     "audit_purged": "审计日志已按保留期清理",
+    "sync_cancelled": "已取消同步",
     "exception_reviewed": "异常已审核",
     "assigned": "任务成员已分配",
     "unassigned": "任务成员已移除",
@@ -4728,6 +4729,19 @@ async def admin_releases_sync(request: Request):
     finally:
         c.close()
     return _see_other("/admin/releases?notice=" + ("sync_already" if r["state"] == "already" else "sync_started"))
+
+
+@router.post("/admin/releases/sync/cancel")
+async def admin_releases_cancel(request: Request):
+    user, denied = _admin_or_403(request)
+    if denied:
+        return denied
+    form = await request.form()
+    if not _csrf_ok(str(form.get("csrf_token", "")), user["csrf_token"]):
+        return _error_page(request, 403, "CSRF 校验失败")
+    from app import app_sync as _app_sync
+    _app_sync.cancel_sync(user["username"])
+    return _see_other("/admin/releases?notice=sync_cancelled")
 
 
 @router.post("/admin/releases/delete")

@@ -33,6 +33,8 @@
     <p><span class="badge b-ok">已同步</span> v{{ st.versionName }}（{{ st.versionCode }}）· {{ st.source }} · {{ st.at|local_dt }}</p>
   {% elif st.state == "failed" %}
     <p><span class="badge b-err">同步失败</span> v{{ st.versionName }}（{{ st.versionCode }}）：{{ st.error }}</p>
+  {% elif st.state == "cancelled" %}
+    <p><span class="badge b-warn">已取消</span> v{{ st.versionName }}（{{ st.versionCode }}）· 可重新发起</p>
   {% endif %}
   <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
     <form method="post" action="/admin/releases/sync/check" style="display:flex;gap:8px;align-items:flex-end">
@@ -50,6 +52,13 @@
       <input type="hidden" name="source" value="{{ remote_source or 'auto' }}">
       <button type="submit" class="btn btn-sm"{% if st.state in ("queued", "downloading", "verifying") %} disabled{% endif %}>同步最新版本</button>
     </form>
+    {% if st.state in ("queued", "downloading", "verifying") %}
+    <form method="post" action="/admin/releases/sync/cancel"
+          data-confirm="取消当前同步？已下载的部分会被丢弃。" data-confirm-title="取消同步" data-confirm-ok="取消同步">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-sm btn-secondary">取消同步</button>
+    </form>
+    {% endif %}
   </div>
   {% if remote_error %}<p class="mb-err" style="color:var(--danger,#c0392b)">{{ remote_error }}</p>{% endif %}
   {% if remote %}

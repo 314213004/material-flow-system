@@ -44,6 +44,11 @@ _SHA256_RE = re.compile(r"\b([0-9a-f]{64})\b")
 _UA = {"User-Agent": "material-flow-app-sync"}
 _STALE_SECONDS = 40 * 60
 _ACTIVE = ("queued", "downloading", "verifying")
+# 下载停滞判定：连续这么久没有任何新字节就放弃（换下一个地址/报错），
+# 避免像"卡在 45%"那样无限等下去。
+_STALL_SECONDS = 90
+# 取消信号：下载循环每读一块检查一次；只有本进程的线程会看到它。
+_CANCEL = threading.Event()
 
 
 def _github_proxy() -> str:
@@ -154,6 +159,51 @@ def _write_status(d: dict) -> None:
     tmp.replace(_status_file())
 
 
+def recover_interrupted() -> dict | None:
+    """服务启动时调用：把上次进程被杀留下的"下载中"状态收尾。
+
+    同步线程是 daemon，服务重启（发版/重启/崩溃）会把它直接杀掉，
+    状态文件就会永远停在某个百分比（现场看到的就是"卡在 45%"）。
+    这里把它标成 failed 并清掉半截 .part，前端立刻能重新发起。
+    """
+    st = get_status()
+    if st.get("state") not in _ACTIVE:
+        return None
+    pct = ""
+    try:
+        if st.get("total"):
+            pct = f"，中断时约 {int(st.get('bytes') or 0) * 100 // int(st['total'])}%"
+    except (TypeError, ValueError, ZeroDivisionError):
+        pct = ""
+    _write_status({**{k: st.get(k) for k in ("source", "tag", "versionCode", "versionName", "actor") if k in st},
+                   "state": "failed", "bytes": st.get("bytes") or 0, "total": st.get("total") or 0,
+                   "error": f"服务重启导致同步中断{pct}，请重新发起", "finishedAt": _now()})
+    for part in _dir().glob(".sync-*.part"):
+        part.unlink(missing_ok=True)
+    return {"state": "failed", "tag": st.get("tag"), "versionCode": st.get("versionCode")}
+
+
+def cancel_sync(actor: str = "") -> dict:
+    """取消当前同步：有线程在跑就让它自己收尾，没有线程（进程重启过）就直接改状态。"""
+    st = get_status()
+    if st.get("state") not in _ACTIVE:
+        return {"state": st.get("state") or "idle", "cancelled": False}
+    _CANCEL.set()
+    if _thread_alive():
+        # 线程会自己看到信号并在 finally 里收尾，前端轮询状态即可
+        return {"state": "cancelling", "cancelled": True, "tag": st.get("tag")}
+    # 没有活跃线程（进程重启过）：直接改状态并清半截文件
+    _write_status({**{k: st.get(k) for k in ("source", "tag", "versionCode", "versionName") if k in st},
+                   "state": "cancelled", "error": "已取消", "actor": actor, "finishedAt": _now()})
+    for part in _dir().glob(".sync-*.part"):
+        part.unlink(missing_ok=True)
+    return {"state": "cancelled", "cancelled": True, "tag": st.get("tag")}
+
+
+def _thread_alive() -> bool:
+    return any(t.name == "app-sync" and t.is_alive() for t in threading.enumerate())
+
+
 def get_status() -> dict:
     try:
         st = json.loads(_status_file().read_text(encoding="utf-8"))
@@ -203,12 +253,18 @@ def _download(rel: dict, part: Path, deadline: float, progress) -> tuple[str, st
                 if total > _updates._APK_MAX_BYTES:
                     raise RuntimeError("安装包超过 300MB 上限")
                 last_report = 0.0
+                last_byte_at = time.time()
                 while True:
+                    if _CANCEL.is_set():
+                        raise RuntimeError("已取消")
                     if time.time() > deadline:
                         raise RuntimeError(f"下载超时（>{_max_seconds()} 秒）")
+                    if time.time() - last_byte_at > _STALL_SECONDS:
+                        raise RuntimeError(f"下载停滞超过 {_STALL_SECONDS} 秒")
                     chunk = resp.read(256 * 1024)
                     if not chunk:
                         break
+                    last_byte_at = time.time()
                     got += len(chunk)
                     if got > _updates._APK_MAX_BYTES:
                         raise RuntimeError("安装包超过 300MB 上限")
@@ -231,6 +287,7 @@ def _run(rel: dict, actor: str, lock_fd: int) -> None:
     part = _dir() / f".sync-{rel['versionCode']}.part"
     base = {"source": rel["source"], "tag": rel["tag"], "versionCode": rel["versionCode"],
             "versionName": rel["versionName"], "actor": actor, "startedAt": _now()}
+    _CANCEL.clear()
     try:
         deadline = time.time() + _max_seconds()
 
@@ -258,7 +315,10 @@ def _run(rel: dict, actor: str, lock_fd: int) -> None:
         _write_status({**base, "state": "failed", "error": str(e.detail),
                        "code": getattr(e, "code", "")})
     except Exception as e:  # noqa: BLE001 - 后台线程：记录失败，不抛出
-        _write_status({**base, "state": "failed", "error": str(e)[:400]})
+        if str(e) == "已取消":
+            _write_status({**base, "state": "cancelled", "error": "已取消", "finishedAt": _now()})
+        else:
+            _write_status({**base, "state": "failed", "error": str(e)[:400]})
     finally:
         part.unlink(missing_ok=True)
         try:
@@ -319,7 +379,30 @@ def api_sync(body: dict = Body(default={}), user: sqlite3.Row = Depends(current_
     return start_sync(source, tag, user["username"])
 
 
+@router.post("/api/v1/admin/app/releases/sync/cancel")
+def api_cancel(user: sqlite3.Row = Depends(current_user)) -> dict:
+    _admin(user)
+    return cancel_sync(user["username"])
+
+
 @router.get("/api/v1/admin/app/releases/sync/status")
 def api_status(user: sqlite3.Row = Depends(current_user)) -> dict:
     _admin(user)
     return get_status()
+
+
+if __name__ == "__main__":  # pragma: no cover - 运维入口
+    import argparse
+
+    ap = argparse.ArgumentParser(description="APP 更新通道：查看状态 / 触发同步（运维用）")
+    ap.add_argument("--tag", default="", help="Release 标签，留空=最新")
+    ap.add_argument("--source", default="auto", choices=("auto", "github", "gitee"))
+    ap.add_argument("--status", action="store_true", help="只打印当前同步状态")
+    ap.add_argument("--actor", default="cli")
+    args = ap.parse_args()
+    if args.status:
+        print(json.dumps(get_status(), ensure_ascii=False, indent=2))
+    else:
+        print(json.dumps(start_sync(args.source, args.tag, args.actor, wait=True),
+                         ensure_ascii=False, indent=2))
+        print(json.dumps(get_status(), ensure_ascii=False, indent=2))

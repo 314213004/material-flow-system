@@ -1180,6 +1180,19 @@ def _migrate_legacy_order_requirements(c: sqlite3.Connection) -> None:
 @app.on_event("startup")
 def startup() -> None:
     init_db()
+    # APP 更新通道：上次进程被杀留下的"下载中"状态要收尾，否则前端永远停在某个百分比
+    try:
+        from . import app_sync as _app_sync
+    except ImportError:
+        try:
+            import app_sync as _app_sync
+        except ImportError:
+            _app_sync = None
+    if _app_sync is not None:
+        try:
+            _app_sync.recover_interrupted()
+        except OSError:
+            pass
     # 启动时清理过期的管理台会话（v0.6.3）；失败不影响启动
     try:
         c = db()

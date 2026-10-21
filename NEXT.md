@@ -10,9 +10,9 @@
 | 项 | 值 |
 |----|-----|
 | 主仓库 | GitHub `owlco001/material-flow-system`（镜像 Gitee `owlco001/material-flow-system`），主干 `main` |
-| 基线 | 后端 **0.21.15**、App **0.5.48**（versionCode 55），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
+| 基线 | 后端 **0.21.16**、App **0.5.48**（versionCode 55），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
 | 生产 | `jsby@221.231.106.194:5556` 的 `/srv/material-flow`（systemd `material-flow.service`，cloudflared 221）；更新用 `sudo -n /bin/bash /srv/material-flow/deploy/update.sh`（含 DB 热备 + 失败自动回滚） |
-| 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **508 passed**，约 3.5 分钟 |
+| 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **512 passed**，约 3.5 分钟 |
 | App 测试 | `cd logistics-android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest` → **206 例 0 失败**；发版 `:app:assembleRelease` |
 | 门禁 | `python3 scripts/check_emoji_icons.py` 必须 PASS（75 个 .kt） |
 
@@ -27,6 +27,7 @@
 - 盘点 / 异常列表分页（`page`/`pageSize`/`total`），App 盘点页每页 50 条 + 「加载更多」
 - App 0.5.48 订单页物料清单开分页（每页 200 + 「加载更多物料」），齐套率/缺料数全走服务端
   （`shortageLineCount`）；`detail.materialSummary` 口径不变
+- APP 更新通道加固：服务重启后自动把“下载中”收尾为失败并清半截 .part（现场“卡 45%”的根因），新增取消同步（接口 + 管理台按钮）、下载停滞 90 秒放弃、运维 CLI `python -m app.app_sync`
 - 审计日志保留策略：`GET /api/v1/admin/audit/retention` 预览 + `POST /api/v1/admin/audit/purge`
   （仅 ADMIN，days 30..3650，dryRun 默认 true，清理动作自身留 PURGE 审计）；管理台审计页加"保留策略"卡片
 - 订单物料状态（App 订单页用的 `POST /orders/material-status`）也支持分页：`page`/`pageSize`
