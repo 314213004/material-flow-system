@@ -43,6 +43,10 @@ def seed():
               " VALUES('m1','M-1','轴承','6204','个',100,100,1)")
     c.execute("INSERT OR IGNORE INTO locations(id, code, name) VALUES('loc-a','A-01','一号库位')")
     c.execute("INSERT OR IGNORE INTO locations(id, code, name) VALUES('loc-b','A-02','二号库位')")
+    c.execute("INSERT OR IGNORE INTO production_orders(id, order_no, product_name, status, created_at, updated_at)"
+              " VALUES('ord-1','OM-1','产品','IN_PROGRESS',?,?)", (now, now))
+    c.execute("INSERT OR IGNORE INTO devices(id, device_no, device_name, workshop, created_by, created_at, updated_at)"
+              " VALUES('dev-1','DEV-1','机台','一车间','u_wh',?,?)", (now, now))
     c.execute("INSERT OR IGNORE INTO inventory(id, material_id, location_id, quantity)"
               " VALUES('inv-a','m1','loc-a',60)")
     c.execute("INSERT OR IGNORE INTO inventory(id, material_id, location_id, quantity)"
@@ -119,3 +123,35 @@ def test_unknown_location_is_rejected():
         c = backend.db()
         assert c.execute("SELECT COUNT(*) FROM stocktakes").fetchone()[0] == 0
         c.close()
+
+
+def test_stocktake_list_paginates():
+    """盘点是长期累积数据，必须能翻页（原来固定只返回最新 100 条）。"""
+    seed()
+    with TestClient(backend.app) as client:
+        token = login(client, "wh-admin")
+        for actual in (11, 12, 13):
+            assert create(client, token, "M-1", "A-01", actual).status_code == 200
+        first = client.get("/api/v1/stocktakes?page=1&pageSize=2", headers=H(token)).json()
+        assert first["total"] == 3 and first["totalPages"] == 2 and len(first["items"]) == 2
+        second = client.get("/api/v1/stocktakes?page=2&pageSize=2", headers=H(token)).json()
+        assert len(second["items"]) == 1
+        ids = {x["id"] for x in first["items"]} | {x["id"] for x in second["items"]}
+        assert len(ids) == 3, "两页不能重复"
+
+
+def test_exception_list_paginates():
+    seed()
+    with TestClient(backend.app) as client:
+        token = login(client, "wh-admin")
+        # 异常单用 API 造 3 条（上面 create 是盘点接口）
+        for book, actual in ((10, 8), (10, 9), (10, 10)):
+            r = client.post("/api/v1/exceptions", json={
+                "orderNo": "OM-1", "deviceId": "dev-1", "materialId": "m1", "type": "SHORTAGE",
+                "bookQuantity": book, "actualQuantity": actual, "description": "x",
+            }, headers=H(token))
+            assert r.status_code in (200, 201), r.text
+        page1 = client.get("/api/v1/exceptions?page=1&pageSize=2", headers=H(token)).json()
+        assert page1["total"] == 3 and page1["totalPages"] == 2 and len(page1["items"]) == 2
+        page2 = client.get("/api/v1/exceptions?page=2&pageSize=2", headers=H(token)).json()
+        assert len(page2["items"]) == 1

@@ -10,10 +10,10 @@
 | 项 | 值 |
 |----|-----|
 | 主仓库 | GitHub `owlco001/material-flow-system`（镜像 Gitee `owlco001/material-flow-system`），主干 `main` |
-| 基线 | 后端 **0.21.10**、App **0.5.46**（versionCode 53），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
+| 基线 | 后端 **0.21.11**、App **0.5.47**（versionCode 54），本地工作目录 `/root/mf-main`（GitHub 干净 clone） |
 | 生产 | `jsby@221.231.106.194:5556` 的 `/srv/material-flow`（systemd `material-flow.service`，cloudflared 221）；更新用 `sudo -n /bin/bash /srv/material-flow/deploy/update.sh`（含 DB 热备 + 失败自动回滚） |
-| 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **493 passed**，约 3.5 分钟 |
-| App 测试 | `cd logistics-android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest` → **198 例 0 失败**；发版 `:app:assembleRelease` |
+| 后端测试 | `cd material-flow-backend && env -u PYTHONPATH ./.venv/bin/python -m pytest tests/ -q -p no:cacheprovider` → **495 passed**，约 3.5 分钟 |
+| App 测试 | `cd logistics-android && ANDROID_HOME=/opt/android-sdk ./gradlew :app:testDebugUnitTest` → **201 例 0 失败**；发版 `:app:assembleRelease` |
 | 门禁 | `python3 scripts/check_emoji_icons.py` 必须 PASS（75 个 .kt） |
 
 **2026-10-20～21 这一批已完成**（都已在 221 上线 / 双端 Release）
@@ -24,6 +24,7 @@
 - 盘点确认真正调整库存 + 创建校验库位并落真实 id；异常审批通过按差异校正库存（可指定库位，未指定按单库位/最大库位）
 - 审批页详情改为在当张卡片下展开；U9 库存同步把已清零/不再返回的库位归零
 - 新增只读巡检 `GET /api/v1/inventory/consistency`（ADMIN/仓管）对账 `materials.total_quantity` 与 `sum(inventory.quantity)`
+- 盘点 / 异常列表分页（`page`/`pageSize`/`total`），App 盘点页每页 50 条 + 「加载更多」
 
 **已知未决**
 - U9 库存同步长期"全部不变"（行数恒 9643）：已记录核查 SQL，疑 U9 侧 `InvTrans_WhQoh` 未刷新，待现场结论

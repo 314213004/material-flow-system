@@ -214,6 +214,16 @@ object ApiParser {
         )
     }
 
+    /** 盘点列表分页：GET /api/v1/stocktakes?page&pageSize → {items,total,page}。 */
+    fun parseStocktakePage(json: String): com.company.logistics.model.StocktakePage {
+        val root = JSONObject(json)
+        return com.company.logistics.model.StocktakePage(
+            items = parseStocktakeList(json),
+            total = root.optInt("total", root.optJSONArray("items")?.length() ?: 0),
+            page = root.optInt("page", 1),
+        )
+    }
+
     /** 盘点列表：GET /api/v1/stocktakes → {items:[...]}。 */
     fun parseStocktakeList(json: String): List<com.company.logistics.model.StocktakeRecord> {
         val root = JSONObject(json)

@@ -132,6 +132,9 @@ internal fun assemblyDeviceRoute(scan: ScanResult): AssemblyDeviceRoute? {
 /**
  * 全局 UI 状态。
  */
+/** 盘点列表每页条数（0.5.47）。 */
+private const val STOCKTAKE_PAGE_SIZE = 50
+
 data class LogisticsUiState(
     val authState: AuthState = AuthState.Restoring,
 
@@ -252,6 +255,9 @@ data class LogisticsUiState(
     val stocktakes: List<com.company.logistics.model.StocktakeRecord> = emptyList(),
     val stocktakeState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
     val stocktakeError: String? = null,
+    val stocktakeTotal: Int = 0,
+    val stocktakePage: Int = 1,
+    val stocktakeLoadingMore: Boolean = false,
     val stocktakeSubmitting: Boolean = false,
     val auditPage: Int = 1,
     val auditPageSize: Int = AUDIT_PAGE_SIZE,
@@ -1968,17 +1974,20 @@ class LogisticsViewModel(
         }
     }
 
-    /** 盘点列表（0.5.45）：物料员/仓管/管理员可见。 */
+    /** 盘点列表（0.5.45）：物料员/仓管/管理员可见；0.5.47 起分页，先取第一页。 */
     fun refreshStocktakes() {
         if (!_state.value.loggedIn) return
         operationScope.launch {
             _state.update { it.copy(stocktakeState = WorkspaceLoadState.LOADING, stocktakeError = null) }
-            repo.stocktakes()
-                .onSuccess { list ->
+            repo.stocktakes(page = 1, pageSize = STOCKTAKE_PAGE_SIZE)
+                .onSuccess { page ->
                     _state.update {
                         it.copy(
-                            stocktakes = list,
-                            stocktakeState = if (list.isEmpty()) WorkspaceLoadState.EMPTY else WorkspaceLoadState.CONTENT,
+                            stocktakes = page.items,
+                            stocktakeTotal = page.total,
+                            stocktakePage = page.page,
+                            stocktakeLoadingMore = false,
+                            stocktakeState = if (page.items.isEmpty()) WorkspaceLoadState.EMPTY else WorkspaceLoadState.CONTENT,
                             stocktakeError = null,
                         )
                     }
@@ -1989,6 +1998,39 @@ class LogisticsViewModel(
                             stocktakeState = WorkspaceLoadState.ERROR,
                             stocktakeError = if (e is ApiException) e.safeMessage("加载盘点记录失败") else "网络不可用",
                             stocktakes = emptyList(),
+                            stocktakeTotal = 0,
+                            stocktakeLoadingMore = false,
+                        )
+                    }
+                }
+        }
+    }
+
+    /** 盘点"加载更多"：追加下一页，失败保留已加载数据只提示。 */
+    fun loadMoreStocktakes() {
+        val st = _state.value
+        if (!st.loggedIn || st.stocktakeLoadingMore) return
+        if (st.stocktakes.size >= st.stocktakeTotal) return
+        operationScope.launch {
+            _state.update { it.copy(stocktakeLoadingMore = true) }
+            repo.stocktakes(page = st.stocktakePage + 1, pageSize = STOCKTAKE_PAGE_SIZE)
+                .onSuccess { page ->
+                    _state.update { cur ->
+                        val merged = (cur.stocktakes + page.items).distinctBy { it.id }
+                        cur.copy(
+                            stocktakes = merged,
+                            stocktakeTotal = page.total,
+                            stocktakePage = page.page,
+                            stocktakeLoadingMore = false,
+                            stocktakeError = null,
+                        )
+                    }
+                }
+                .onFailure { e ->
+                    _state.update {
+                        it.copy(
+                            stocktakeLoadingMore = false,
+                            stocktakeError = if (e is ApiException) e.safeMessage("加载更多盘点失败") else "网络不可用，加载更多失败",
                         )
                     }
                 }

@@ -7272,10 +7272,18 @@ def create_stocktake(
 
 
 @app.get("/api/v1/stocktakes")
-def list_stocktakes(user: sqlite3.Row = Depends(current_user)) -> dict[str, Any]:
+def list_stocktakes(
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=100, ge=1, le=200),
+    user: sqlite3.Row = Depends(current_user),
+) -> dict[str, Any]:
     c = db()
     try:
-        return {"items": stocktakes_page(c, 100, 0)}
+        # 0.21.11：盘点是长期累积的数据，必须能翻页（原来固定只返回最新 100 条）。
+        total = stocktakes_count(c)
+        return {"items": stocktakes_page(c, pageSize, (page - 1) * pageSize),
+                "page": page, "pageSize": pageSize, "total": total,
+                "totalPages": (total + pageSize - 1) // pageSize if total else 0}
     finally:
         c.close()
 
@@ -7390,10 +7398,17 @@ def create_exception(
 
 
 @app.get("/api/v1/exceptions")
-def list_exceptions(user: sqlite3.Row = Depends(current_user)) -> dict[str, Any]:
+def list_exceptions(
+    page: int = Query(default=1, ge=1),
+    pageSize: int = Query(default=100, ge=1, le=200),
+    user: sqlite3.Row = Depends(current_user),
+) -> dict[str, Any]:
     c = db()
     try:
-        return {"items": exceptions_page(c, 100, 0)}
+        total = c.execute("SELECT COUNT(*) FROM exceptions").fetchone()[0]
+        return {"items": exceptions_page(c, pageSize, (page - 1) * pageSize),
+                "page": page, "pageSize": pageSize, "total": total,
+                "totalPages": (total + pageSize - 1) // pageSize if total else 0}
     finally:
         c.close()
 

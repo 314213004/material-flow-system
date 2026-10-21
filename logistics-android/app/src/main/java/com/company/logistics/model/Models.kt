@@ -277,6 +277,9 @@ data class StocktakeRecord(
     val createdAt: String?,
 )
 
+/** 盘点列表分页结果（0.5.47）：盘点会长期累积，App 需要能往下翻。 */
+data class StocktakePage(val items: List<StocktakeRecord>, val total: Int, val page: Int)
+
 
 data class ManagedUser(
     val id: String,

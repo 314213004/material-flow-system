@@ -373,6 +373,9 @@ fun LogisticsApp(
                         onConfirm = { viewModel.confirmStocktake(it) },
                         onRefresh = { viewModel.refreshStocktakes() },
                         onBack = { viewModel.navigate(Screen.WORKSPACE) },
+                        total = state.stocktakeTotal,
+                        loadingMore = state.stocktakeLoadingMore,
+                        onLoadMore = { viewModel.loadMoreStocktakes() },
                     )
 
                     Screen.MY_EXCEPTIONS -> MyExceptionsScreen(

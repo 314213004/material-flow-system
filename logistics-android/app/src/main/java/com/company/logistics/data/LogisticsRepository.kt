@@ -274,8 +274,9 @@ open class LogisticsRepository(
 
     /** Workshop assembly APIs use server-side timestamps and stable idempotency keys. */
 
-    /** 盘点列表 */
-    open suspend fun stocktakes(): Result<List<com.company.logistics.model.StocktakeRecord>> = resultOf { api.listStocktakes() }
+    /** 盘点列表（分页） */
+    open suspend fun stocktakes(page: Int = 1, pageSize: Int = 50): Result<com.company.logistics.model.StocktakePage> =
+        resultOf { api.listStocktakes(page, pageSize) }
 
     /** 确认盘点（仓管/管理员） */
     open suspend fun confirmStocktake(stocktakeId: String, clientOperationId: String? = null): Result<String> = resultOf {

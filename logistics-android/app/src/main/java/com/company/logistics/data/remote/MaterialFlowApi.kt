@@ -1008,10 +1008,13 @@ open class MaterialFlowApi(
         }
     }
 
-    /** GET /api/v1/stocktakes：盘点列表（服务端按创建时间倒序）。 */
-    suspend fun listStocktakes(): List<com.company.logistics.model.StocktakeRecord> = withContext(Dispatchers.IO) {
-        ApiParser.parseStocktakeList(request("GET", "/api/v1/stocktakes", null))
-    }
+    /** GET /api/v1/stocktakes：盘点列表（服务端按创建时间倒序，支持分页）。 */
+    suspend fun listStocktakes(page: Int = 1, pageSize: Int = 50): com.company.logistics.model.StocktakePage =
+        withContext(Dispatchers.IO) {
+            ApiParser.parseStocktakePage(
+                request("GET", "/api/v1/stocktakes?page=$page&pageSize=$pageSize", null)
+            )
+        }
 
     /** POST /api/v1/stocktakes/{id}/confirm：仓管/管理员确认盘点。 */
     suspend fun confirmStocktake(stocktakeId: String, clientOperationId: String): String = withContext(Dispatchers.IO) {

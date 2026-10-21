@@ -55,6 +55,9 @@ fun StocktakeScreen(
     onConfirm: (stocktakeId: String) -> Unit,
     onRefresh: () -> Unit,
     onBack: () -> Unit,
+    total: Int = 0,
+    loadingMore: Boolean = false,
+    onLoadMore: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     var showDialog by remember { mutableStateOf(false) }
@@ -98,10 +101,27 @@ fun StocktakeScreen(
             }
             WorkspaceLoadState.EMPTY, WorkspaceLoadState.IDLE ->
                 EmptyState(title = "暂无盘点单", description = "新建盘点后会在这里显示，等待仓管确认。")
-            WorkspaceLoadState.CONTENT -> records.forEach { record ->
-                StocktakeCard(record, canConfirm = canConfirm && record.status == "PENDING_CONFIRM",
-                    enabled = !submitting, onConfirm = onConfirm)
-                VSpace(Spacing.sm)
+            WorkspaceLoadState.CONTENT -> {
+                records.forEach { record ->
+                    StocktakeCard(record, canConfirm = canConfirm && record.status == "PENDING_CONFIRM",
+                        enabled = !submitting, onConfirm = onConfirm)
+                    VSpace(Spacing.sm)
+                }
+                // 盘点是长期累积的数据：每页 50 条，还有就继续往下翻
+                if (records.size < total) {
+                    VSpace(Spacing.xs)
+                    Text(
+                        "已显示 ${records.size} / $total 条",
+                        fontSize = 12.sp,
+                        color = LogisticsTheme.colors.textSecondary,
+                    )
+                    VSpace(Spacing.xs)
+                    SecondaryButton(
+                        text = if (loadingMore) "加载中…" else "加载更多",
+                        onClick = { if (!loadingMore) onLoadMore() },
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
             }
         }
 
