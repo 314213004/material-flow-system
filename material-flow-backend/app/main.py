@@ -7356,6 +7356,44 @@ def exceptions_page(c: sqlite3.Connection, limit: int, offset: int) -> list[dict
     return [dict(r) for r in rows]
 
 
+def _apply_exception_adjustment(c: sqlite3.Connection, eid: str) -> dict[str, Any] | None:
+    """把异常单的差异落到库存上（审批通过时调用）。
+
+    - 无物料或无差异：不动，返回说明；
+    - 该料号只有一条库位库存：直接调整那条，再按库存表重算汇总，保证"汇总 = 明细合计"；
+    - 多条库位（异常单没有库位字段，无法归属）：调整数量最大的那条并回报库位 id，
+      保证不变式成立，具体货位由盘点再细化。
+    """
+    ex = c.execute("SELECT material_id, book_quantity, actual_quantity, difference"
+                   "  FROM exceptions WHERE id=?", (eid,)).fetchone()
+    if not ex or not ex["material_id"]:
+        return {"adjusted": False, "reason": "异常单未关联物料"}
+    diff = int(ex["difference"] or 0)
+    if diff == 0:
+        return {"adjusted": False, "reason": "账实无差异"}
+    mat = c.execute("SELECT id,total_quantity FROM materials WHERE id=?", (ex["material_id"],)).fetchone()
+    if not mat:
+        return {"adjusted": False, "reason": "物料不存在"}
+    before = int(mat["total_quantity"])
+    rows = c.execute("SELECT id, location_id, quantity FROM inventory WHERE material_id=?"
+                     " ORDER BY quantity DESC, id", (mat["id"],)).fetchall()
+    location_id = None
+    if rows:
+        target = rows[0]
+        c.execute("UPDATE inventory SET quantity=? WHERE id=?",
+                  (max(0, int(target["quantity"]) + diff), target["id"]))
+        location_id = target["location_id"]
+        after = int(c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE material_id=?",
+                              (mat["id"],)).fetchone()[0])
+    else:
+        after = max(0, before + diff)
+    c.execute("UPDATE materials SET total_quantity=?, available_quantity=MAX(0,available_quantity+?),"
+              " version=version+1 WHERE id=?", (after, diff, mat["id"]))
+    return {"adjusted": True, "materialId": mat["id"], "locationId": location_id,
+            "before": before, "after": after, "difference": diff,
+            "locationAdjusted": location_id is not None}
+
+
 @app.post("/api/v1/exceptions/{eid}/review")
 def review_exception(
     eid: str, body: Decision, request: Request,
@@ -7384,8 +7422,11 @@ def review_exception(
         cur = c.execute("UPDATE exceptions SET status=?,reviewed_by=?,reviewed_at=? WHERE id=? AND status IN ('PENDING','OPEN')", (status, user["id"], reviewed_at, eid))
         if cur.rowcount != 1:
             _conflict("异常状态不允许审批", trace_id)
+        # 0.21.9：异常审批通过即按「实盘 - 账面」校正库存（拒绝不动），
+        # 否则异常单只是记录，账实依旧不一致（与盘点确认同口径）。
+        adjusted = _apply_exception_adjustment(c, eid) if status == "APPROVED" else None
         audit(c, user["id"], user["role"], "REVIEW", "EXCEPTION", eid, request_id=trace_id)
-        result = {"exceptionId": eid, "status": status, "traceId": trace_id}
+        result = {"exceptionId": eid, "status": status, "traceId": trace_id, "adjusted": adjusted}
         c.execute("INSERT INTO exception_operations VALUES(?,?,?,?,?,?)", (operation, eid, "REVIEW", payload, json.dumps(result, ensure_ascii=False), reviewed_at))
         return result
 # Workshop assembly vertical slice routes
