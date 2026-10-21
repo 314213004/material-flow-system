@@ -7198,8 +7198,23 @@ def create_stocktake(
     material = c.execute("SELECT id,total_quantity FROM materials WHERE code=?", (body.materialCode,)).fetchone()
     if not material:
         c.close(); raise HTTPException(404, "物料不存在")
-    book = material["total_quantity"] if body.bookQuantity is None else body.bookQuantity
-    c.execute("INSERT INTO stocktakes VALUES(?,?,?,?,?,?,?,?,?,?,?)", (sid, material["id"], body.locationCode, book, body.actualQuantity, body.actualQuantity - book, "PENDING_CONFIRM", user["id"], now(), None, None))
+    # 库位按编码校验并落真实 id（列名是 location_id，不能再塞编码）；指定库位时账面取该库位数量。
+    location = None
+    if body.locationCode:
+        location = c.execute("SELECT id,code FROM locations WHERE code=?", (body.locationCode,)).fetchone()
+        if not location:
+            c.close(); raise HTTPException(404, "库位不存在")
+    if body.bookQuantity is not None:
+        book = body.bookQuantity
+    elif location:
+        row = c.execute("SELECT quantity FROM inventory WHERE material_id=? AND location_id=?",
+                        (material["id"], location["id"])).fetchone()
+        book = row["quantity"] if row else 0
+    else:
+        book = material["total_quantity"]
+    c.execute("INSERT INTO stocktakes VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+              (sid, material["id"], location["id"] if location else None, book, body.actualQuantity,
+               body.actualQuantity - book, "PENDING_CONFIRM", user["id"], now(), None, None))
     audit(c, user["id"], user["role"], "CREATE", "STOCKTAKE", sid, request_id=trace_id)
     c.commit(); c.close()
     return {"stocktakeId": sid, "status": "PENDING_CONFIRM", "difference": body.actualQuantity - book, "serverTime": now()}
@@ -7219,7 +7234,9 @@ def stocktakes_page(c: sqlite3.Connection, limit: int, offset: int) -> list[dict
     rows = c.execute(
         "SELECT s.*,m.code material_code,l.code location_code FROM stocktakes s"
         " JOIN materials m ON m.id=s.material_id"
-        " LEFT JOIN locations l ON l.id=s.location_id"
+        # 历史数据里 location_id 可能存的是库位编码（0.21.7 之前 create 直接写 body.locationCode），
+        # 两种都兼容匹配，避免列表库位显示为空、确认时找不到库位。
+        " LEFT JOIN locations l ON l.id=s.location_id OR l.code=s.location_id"
         " ORDER BY s.created_at DESC, s.id DESC LIMIT ? OFFSET ?", (limit, offset),
     ).fetchall()
     return [dict(r) for r in rows]
@@ -7256,10 +7273,38 @@ def confirm_stocktake(
         row = c.execute("SELECT * FROM stocktakes WHERE id=? AND status='PENDING_CONFIRM'", (sid,)).fetchone()
         if not row:
             _conflict("待确认盘点不存在或已处理", trace_id)
+        # 0.21.8：确认即生效——按实盘数改库存，否则盘点只是记账、账实仍然不符。
+        location = None
+        if row["location_id"]:
+            location = c.execute("SELECT id FROM locations WHERE id=? OR code=?",
+                                 (row["location_id"], row["location_id"])).fetchone()
+        actual = int(row["actual_quantity"])
+        book = int(row["book_quantity"])
+        diff = actual - book
+        if location:
+            existing = c.execute("SELECT id FROM inventory WHERE material_id=? AND location_id=?",
+                                 (row["material_id"], location["id"])).fetchone()
+            if existing:
+                c.execute("UPDATE inventory SET quantity=? WHERE id=?", (actual, existing["id"]))
+            else:
+                c.execute("INSERT INTO inventory(id, material_id, location_id, quantity) VALUES(?,?,?,?)",
+                          (f"inv-{sid}-{location['id']}", row["material_id"], location["id"], actual))
+            total = c.execute("SELECT COALESCE(SUM(quantity),0) FROM inventory WHERE material_id=?",
+                              (row["material_id"],)).fetchone()[0]
+            c.execute("UPDATE materials SET total_quantity=?, available_quantity=MAX(0,available_quantity+?),"
+                      " version=version+1 WHERE id=?",
+                      (int(total), diff, row["material_id"]))
+        else:
+            c.execute("UPDATE materials SET total_quantity=?, available_quantity=MAX(0,available_quantity+?),"
+                      " version=version+1 WHERE id=?",
+                      (actual, diff, row["material_id"]))
         confirmed_at = now()
         c.execute("UPDATE stocktakes SET status='CONFIRMED',confirmed_by=?,confirmed_at=? WHERE id=?", (user["id"], confirmed_at, sid))
         audit(c, user["id"], user["role"], "CONFIRM", "STOCKTAKE", sid, request_id=trace_id)
-        result = {"stocktakeId": sid, "status": "CONFIRMED", "traceId": trace_id}
+        result = {"stocktakeId": sid, "status": "CONFIRMED", "traceId": trace_id,
+                  "adjusted": {"materialId": row["material_id"],
+                               "locationId": location["id"] if location else None,
+                               "before": book, "after": actual, "difference": diff}}
         c.execute("INSERT INTO stocktake_operations VALUES(?,?,?,?,?,?)", (operation, sid, "CONFIRM", payload, json.dumps(result, ensure_ascii=False), confirmed_at))
         return result
 @app.post("/api/v1/exceptions")
