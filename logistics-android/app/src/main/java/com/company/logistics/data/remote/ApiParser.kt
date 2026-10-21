@@ -183,7 +183,11 @@ object ApiParser {
             materials = materials, assemblyTasks = tasks,
             laborSummary = OrderDetailLaborSummary(labor.optInt("assemblyLaborMinutes"), labor.optInt("temporaryTransferLaborMinutes"), labor.optInt("totalLaborMinutes")),
             timeline = timeline, page = root.optInt("page", 1), pageSize = root.optInt("pageSize", 20), total = root.optInt("total", tasks.size),
-            materialSummary = materialSummary
+            materialSummary = materialSummary,
+            materialsTotal = root.optInt("materialsTotal", materials.size),
+            materialsPage = root.optInt("materialsPage", 1),
+            materialsPageSize = root.optInt("materialsPageSize", 0),
+            materialsHasMore = root.optBoolean("materialsHasMore", false),
         )
     }
 

@@ -215,8 +215,14 @@ open class LogisticsRepository(
         api.orderMaterialStatus("PRODUCTION_ORDER", documentNo)
     }
 
-    open suspend fun orderDetail(orderNo: String, page: Int = 1, pageSize: Int = 20): Result<OrderDetail> = resultOf {
-        api.orderDetail(orderNo, page, pageSize)
+    open suspend fun orderDetail(
+        orderNo: String,
+        page: Int = 1,
+        pageSize: Int = 20,
+        materialsPage: Int = 1,
+        materialsPageSize: Int = 0,
+    ): Result<OrderDetail> = resultOf {
+        api.orderDetail(orderNo, page, pageSize, materialsPage, materialsPageSize)
     }
 
     open suspend fun deviceDetail(deviceId: String): Result<DeviceDetail> = resultOf {

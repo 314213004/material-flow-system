@@ -3439,6 +3439,60 @@ def _material_summary(rows: list[sqlite3.Row] | list[dict[str, Any]]) -> dict[st
     }
 
 
+MATERIAL_SUMMARY_COLUMNS = """SELECT r.material_id AS material_id,
+               m.code AS material_code, m.name AS material_name, m.unit AS unit,
+               SUM(r.required_quantity) AS required_quantity,
+               SUM(r.arrived_quantity) AS arrived_quantity,
+               SUM(r.in_stock_quantity) AS in_stock_quantity"""
+
+
+def _material_summary_grouped(rows: list[sqlite3.Row]) -> dict[str, Any]:
+    """由 SQL 聚合行（按 material_id 分组）生成物料汇总，字段与 `_material_summary` 一致。
+
+    大订单（单订单上万条需求）不能为了汇总把每行都读进 Python 再累加，
+    这里交给 SQLite `GROUP BY`，口径仍是同一套作用域 SQL（只是换了列清单）。
+    """
+    items: list[dict[str, Any]] = []
+    for row in rows:
+        required = int(row["required_quantity"] or 0)
+        arrived = int(row["arrived_quantity"] or 0)
+        in_stock = int(row["in_stock_quantity"] or 0)
+        if in_stock >= required:
+            status_code = "IN_STOCK"
+        elif arrived >= required:
+            status_code = "ARRIVED"
+        else:
+            status_code = "OUT_OF_STOCK"
+        items.append({
+            "materialId": row["material_id"],
+            "materialCode": row["material_code"],
+            "materialName": row["material_name"],
+            "unit": row["unit"],
+            "requiredQuantity": required,
+            "arrivedQuantity": arrived,
+            "inStockQuantity": in_stock,
+            "shortageQuantity": max(required - in_stock, 0),
+            "statusCode": status_code,
+            "statusLabel": WORKSPACE_STATUS_LABELS[status_code],
+        })
+    return {
+        "items": items,
+        "totalMaterialTypes": len(items),
+        "totalRequiredQuantity": sum(item["requiredQuantity"] for item in items),
+        "totalArrivedQuantity": sum(item["arrivedQuantity"] for item in items),
+        "totalInStockQuantity": sum(item["inStockQuantity"] for item in items),
+        "totalShortageQuantity": sum(item["shortageQuantity"] for item in items),
+    }
+
+
+def _scoped_material_summary(c: sqlite3.Connection, user: sqlite3.Row,
+                             order_no: str, view_role: str | None = None) -> dict[str, Any]:
+    """订单物料汇总（全量口径，不受分页影响）。"""
+    query, args = _workspace_requirements_sql(user, order_no, view_role, MATERIAL_SUMMARY_COLUMNS)
+    query += " GROUP BY r.material_id ORDER BY m.code"
+    return _material_summary_grouped(c.execute(query, args).fetchall())
+
+
 class OrderModelCreate(BaseModel):
     modelCode: str
     modelName: str
@@ -4328,9 +4382,17 @@ def order_detail(
     order_no: str,
     page: int = Query(1, ge=1),
     pageSize: int = Query(20, ge=1, le=500),
+    # 用普通默认值而不是 Query(...)：管理台会把这个函数当普通函数直接调用，
+    # Query 默认值在那种调用里是对象，做算术会 TypeError。
+    materialsPage: int = 1,
+    materialsPageSize: int = 0,
     user: sqlite3.Row = Depends(current_user),
 ) -> dict[str, Any]:
-    """Return one order's server-fact aggregate with the existing visibility scope."""
+    """Return one order's server-fact aggregate with the existing visibility scope.
+
+    0.21.13：`materials` 支持分页（`materialsPageSize=0` 表示全量，兼容旧客户端）。
+    物料汇总始终按全量口径由 SQL 聚合，不受分页影响。
+    """
     c = db()
     order = c.execute(
         "SELECT id, order_no, product_name, status FROM production_orders WHERE order_no=?",
@@ -4342,8 +4404,18 @@ def order_detail(
 
     # Material rows deliberately reuse the established server-side scope.  This
     # prevents this aggregate from becoming a broad order-material disclosure.
-    scoped = _workspace_requirements(c, user, order_no)
-    if user["role"] not in {"ADMIN", "WORKSHOP_SUPERVISOR", "ASSEMBLER"} and not scoped:
+    if materialsPage < 1 or not 0 <= materialsPageSize <= 500:
+        c.close()
+        raise ApiError(400, CODE_VALIDATION_ERROR, "物料分页参数不合法")
+    materials_total = _workspace_requirements_count(c, user, order_no)
+    if materialsPageSize:
+        scoped = _workspace_requirements(
+            c, user, order_no, None, materialsPageSize,
+            (materialsPage - 1) * materialsPageSize,
+        )
+    else:
+        scoped = _workspace_requirements(c, user, order_no)
+    if user["role"] not in {"ADMIN", "WORKSHOP_SUPERVISOR", "ASSEMBLER"} and not materials_total:
         c.close()
         raise ApiError(403, CODE_FORBIDDEN, "无权查看该订单")
     # 协作装配：非 LEAD 成员（assembly_task_members 未移除）同样可以查看该订单，
@@ -4462,6 +4534,9 @@ def order_detail(
                 "serverTime": row["server_time"], "actorId": row["actor_user_id"],
                 "actorName": row["display_name"] or row["username"] or row["actor_user_id"],
             })
+    # 分页时用 SQL 聚合（不能只对当前页做汇总）；全量时沿用原逻辑，避免多一次查询。
+    material_summary = (_scoped_material_summary(c, user, order_no)
+                        if materialsPageSize else _material_summary(scoped))
     c.close()
     materials = [{
         "requirementId": r["requirement_id"], "deviceId": r["device_id"],
@@ -4479,7 +4554,11 @@ def order_detail(
         "orderId": order["id"], "orderNo": order["order_no"],
         "productName": order["product_name"], "orderStatus": order["status"],
         "materials": materials,
-        "materialSummary": _material_summary(scoped),
+        "materialsTotal": materials_total,
+        "materialsPage": materialsPage,
+        "materialsPageSize": materialsPageSize,
+        "materialsHasMore": bool(materialsPageSize) and materialsPage * materialsPageSize < materials_total,
+        "materialSummary": material_summary,
         "progress": {
             "totalTasks": progress_tasks,
             "completedTasks": progress_row["done"] or 0,
@@ -4724,21 +4803,7 @@ def _workspace_requirements_count(
     return c.execute(f"SELECT COUNT(*) FROM ({query})", args).fetchone()[0]
 
 
-def _workspace_requirements_sql(
-    user: sqlite3.Row, order_no: str | None, view_role: str | None = None,
-) -> tuple[str, list[Any]]:
-    """构造工作台需求行查询（不含 ORDER BY）。
-
-    责任人投影：每条需求只取一条 material_work_items（优先 requirement_id 命中，
-    再按 id），原先三个相同的相关子查询合并为一次 LEFT JOIN；配合
-    material_work_items(requirement_id) 索引不再逐行全表扫描。
-    """
-    effective_role = view_role or user["role"]
-    if effective_role not in ROLES:
-        raise ApiError(403, CODE_FORBIDDEN, "账号角色无效")
-
-    query = """
-        SELECT r.id AS requirement_id,
+WORKSPACE_REQUIREMENT_COLUMNS = """SELECT r.id AS requirement_id,
                COALESCE(wi.id, r.id) AS work_item_id,
                wi.assigned_user_id AS assigned_user_id,
                wu.display_name AS assigned_user_name,
@@ -4760,7 +4825,24 @@ def _workspace_requirements_sql(
                r.in_stock_quantity AS in_stock_quantity,
                r.status_code AS requirement_status_code,
                r.updated_at AS requirement_updated_at,
-               r.created_at AS requirement_created_at
+               r.created_at AS requirement_created_at"""
+
+
+def _workspace_requirements_sql(
+    user: sqlite3.Row, order_no: str | None, view_role: str | None = None,
+    columns: str = WORKSPACE_REQUIREMENT_COLUMNS,
+) -> tuple[str, list[Any]]:
+    """构造工作台需求行查询（不含 ORDER BY）。
+
+    责任人投影：每条需求只取一条 material_work_items（优先 requirement_id 命中，
+    再按 id），原先三个相同的相关子查询合并为一次 LEFT JOIN；配合
+    material_work_items(requirement_id) 索引不再逐行全表扫描。
+    """
+    effective_role = view_role or user["role"]
+    if effective_role not in ROLES:
+        raise ApiError(403, CODE_FORBIDDEN, "账号角色无效")
+
+    query = columns + """
           FROM order_material_requirements r
           JOIN production_orders o ON o.id = r.order_id
           JOIN materials m ON m.id = r.material_id

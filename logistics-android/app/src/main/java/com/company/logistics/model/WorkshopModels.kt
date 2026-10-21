@@ -165,6 +165,11 @@ data class OrderDetail(
     val laborSummary: OrderDetailLaborSummary, val timeline: List<OrderDetailTimelineEvent>,
     val page: Int, val pageSize: Int, val total: Int,
     val materialSummary: OrderDetailMaterialSummary = OrderDetailMaterialSummary(),
+    // 0.5.48：物料清单支持分页（大订单一次上万行会返回几 MB JSON）
+    val materialsTotal: Int = 0,
+    val materialsPage: Int = 1,
+    val materialsPageSize: Int = 0,
+    val materialsHasMore: Boolean = false,
 )
 
 data class AssemblyActionRequest(val clientOperationId: String, val expectedVersion: Int? = null, val stage: Int? = null, val remark: String? = null)

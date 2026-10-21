@@ -419,10 +419,19 @@ open class MaterialFlowApi(
         )
     }
 
-    suspend fun orderDetail(orderNo: String, page: Int = 1, pageSize: Int = 20): OrderDetail = withContext(Dispatchers.IO) {
+    suspend fun orderDetail(
+        orderNo: String,
+        page: Int = 1,
+        pageSize: Int = 20,
+        materialsPage: Int = 1,
+        materialsPageSize: Int = 0,
+    ): OrderDetail = withContext(Dispatchers.IO) {
         require(orderNo.isNotBlank()) { "orderNo 不能为空" }
         require(page >= 1 && pageSize == 20) { "订单详情分页固定为 20 条" }
-        ApiParser.parseOrderDetail(request("GET", "/api/v1/orders/${encodeQuery(orderNo)}/detail?page=$page&pageSize=$pageSize", null))
+        require(materialsPage >= 1 && materialsPageSize >= 0) { "物料分页参数不合法" }
+        val path = "/api/v1/orders/${encodeQuery(orderNo)}/detail?page=$page&pageSize=$pageSize" +
+            if (materialsPageSize > 0) "&materialsPage=$materialsPage&materialsPageSize=$materialsPageSize" else ""
+        ApiParser.parseOrderDetail(request("GET", path, null))
     }
 
     // ==================== 4.3 工作台 ====================
