@@ -284,6 +284,18 @@ fun OrderDetailScreen(
                             fontFamily = LogisticsType.MonoFamily,
                             color = Color.White,
                         )
+                        // 本订单自己的进度（服务端 progress.orderProgressPercent）；
+                        // 没返回就不显示，绝不用齐套率/车间整体值冒充订单进度。
+                        detail?.orderProgress?.orderProgressPercent?.let { percent ->
+                            Spacer(Modifier.width(Spacing.sm))
+                            Text(
+                                "装配进度 $percent%",
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Bold,
+                                fontFamily = LogisticsType.MonoFamily,
+                                color = Color.White,
+                            )
+                        }
                         Spacer(Modifier.weight(1f))
                         if (status.shortageCount > 0) {
                             Surface(

@@ -16,6 +16,7 @@ import com.company.logistics.model.HandoverTimeline
 import com.company.logistics.model.LaborRecord
 import com.company.logistics.model.LaborSummaryPage
 import com.company.logistics.model.MachineProgressPage
+import com.company.logistics.model.OrderProgressPage
 import com.company.logistics.model.MaterialInventory
 import com.company.logistics.model.OfflineOpType
 import com.company.logistics.model.OfflineOperation
@@ -348,6 +349,16 @@ open class LogisticsRepository(
         api.workshopLaborSummary(page, pageSize, deviceId, orderNo, assemblerId)
     }
     open suspend fun workshopMachineProgress(page: Int = 1, pageSize: Int = 20): Result<MachineProgressPage> = resultOf { api.workshopMachineProgress(page, pageSize) }
+
+    /**
+     * 订单维度进度（`/workshop/order-progress`）。
+     *
+     * 主管看板的「订单进度」只用它取数；不再拿车间 overallProgressPercent 冒充订单进度。
+     * 授权车间由服务端按当前账号收敛，客户端不传也不拼装越权参数。
+     */
+    open suspend fun workshopOrderProgress(page: Int = 1, pageSize: Int = 50): Result<OrderProgressPage> = resultOf {
+        api.orderProgress(page, pageSize)
+    }
     open suspend fun workshopMachineProgress(page: Int, pageSize: Int, deviceId: String?): Result<MachineProgressPage> = resultOf { api.workshopMachineProgress(page, pageSize, deviceId) }
 
 

@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Release 网络安全基线：
-  - 仅允许系统信任链上的 HTTPS；
+  Release 网络安全基线（0.5.51 起收敛）：
+  - 全局禁止明文 HTTP：base-config cleartextTrafficPermitted="false"，
+    正式包只允许 HTTPS（与「正式版仅 HTTPS」发布门禁一致）；
   - claws4u.com（含子域，如 test2.claws4u.com）额外做证书锁定（pinning），
     防中间人：即使设备被装入恶意 CA，没有对应私钥也连不上。
+
+  为什么不在 release 里给内网 IP 开明文白名单：
+  network-security-config 的 <domain> 只支持具体主机名/IP，不支持 CIDR 网段
+  （10/8、172.16/12、192.168/16 无法表达）。工厂现场 IP 任意，逐台列白名单既写不全
+  也会过期，等于把「全局放行」换个写法。因此选择「debug 专用配置」方案：
+    app/src/debug/res/xml/network_security_config.xml 覆盖此处 base-config，
+    debug/验收包仍可明文直连内网；正式包一律 HTTPS。
+  连明文地址被拒时 App 会提示「正式版要求 HTTPS，请联系管理员」（见 CleartextTrafficGuard）。
 
   Pin 说明（SPKI SHA-256，2026-09-26 实测）：
   - 主 pin = 当前叶证书（CN=claws4u.com，由 Google Trust Services WE1 签发）
@@ -12,8 +21,8 @@
   过期后 pin 失效回退为普通系统信任链校验（不会直接断连，但请尽快发版更新）。
 -->
 <network-security-config>
-    <!-- 内网（192.168/10/172.16）允许 HTTP 明文：工厂内网无 HTTPS 需求 -->
-    <base-config cleartextTrafficPermitted="true">
+    <!-- 正式包：默认禁止明文，任何 http:// 连接都会被系统拒绝 -->
+    <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>

@@ -36,6 +36,8 @@ import com.company.logistics.model.AssemblyTask
 import com.company.logistics.model.AssemblyTaskStatus
 import com.company.logistics.model.LaborRecord
 import com.company.logistics.model.MachineProgress
+import com.company.logistics.model.OrderProgress
+import com.company.logistics.model.displayProgressPercent
 import com.company.logistics.model.UserRole
 import com.company.logistics.model.WorkshopProgressSummary
 import com.company.logistics.model.WorkspaceViewRole
@@ -297,6 +299,11 @@ fun WorkshopSupervisorScreen(
     assemblyTasks: List<AssemblyTask> = emptyList(),
     assemblyTaskState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
     assemblySubmitting: Boolean = false,
+    /** 订单维度进度（`/workshop/order-progress`）：一订单一行，替代原「订单总进度」错标 */
+    orderProgress: List<OrderProgress> = emptyList(),
+    orderState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
+    orderError: String? = null,
+    orderUnavailable: Boolean = false,
     onAssignMembers: (AssemblyTask, String) -> Unit = { _, _ -> },
     onRemoveMember: (AssemblyTask, String) -> Unit = { _, _ -> },
     modifier: Modifier = Modifier,
@@ -314,7 +321,7 @@ fun WorkshopSupervisorScreen(
         val effectiveRole = previewRole?.toUserRole() ?: authenticatedRole
         RoleWorkspaceHeader(
             title = if (effectiveRole == UserRole.ADMIN) "管理员工作台" else "车间主管工作台",
-            subtitle = "只读查看总工时、机台进度与订单总进度",
+            subtitle = "只读查看总工时、机台进度与订单进度",
             role = effectiveRole,
             authenticatedRole = authenticatedRole,
             previewRole = previewRole,
@@ -362,6 +369,14 @@ fun WorkshopSupervisorScreen(
                 LaborSummaryCards(it)
             }
         }
+
+        OrderProgressSection(
+            orders = orderProgress,
+            state = orderState,
+            error = orderError,
+            unavailable = orderUnavailable,
+            onRefresh = onRefresh,
+        )
 
         VSpace(Spacing.lg)
         Text("机台进度", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = LogisticsTheme.colors.textPrimary)
@@ -973,8 +988,83 @@ private fun LaborSummaryCards(summary: WorkshopProgressSummary) {
         LaborMetricCard("总工时（分钟）", summary.totalLaborMinutes, "装配工时 + 临时调拨工时", LogisticsTheme.colors.primary)
         LaborMetricCard("装配工时（分钟）", summary.assemblyLaborMinutes, "服务端 ASSEMBLY 汇总", LogisticsTheme.colors.info)
         LaborMetricCard("临时调拨工时（分钟）", summary.temporaryTransferLaborMinutes, "独立 TEMPORARY_TRANSFER 汇总", LogisticsTheme.colors.purple)
-        LaborMetricCard("订单总进度", summary.overallProgressPercent, "服务端完成任务与阶段汇总", LogisticsTheme.colors.success, suffix = "%")
+        // 这里原本写的是「订单总进度」但取的是车间/全厂 overallProgressPercent —— 口径错标。
+        // 现在如实标成车间整体进度；订单维度进度见下方 OrderProgressSection。
+        LaborMetricCard("车间整体进度", summary.overallProgressPercent, "服务端按全部任务阶段汇总（非单个订单）", LogisticsTheme.colors.success, suffix = "%")
         Text("任务总数 ${summary.totalTasks} · 已完工 ${summary.completedTasks}", fontSize = 12.sp, color = LogisticsTheme.colors.textSecondary)
+    }
+}
+
+/**
+ * 订单维度进度区：一订单一卡（订单号 + 进度 + 机台任务数）。
+ *
+ * 数据只来自 `/workshop/order-progress`；服务端没给 orderProgressPercent 时显示「—」，
+ * 错误/空态给中文提示，绝不用 0% 或车间整体值顶替。
+ */
+@Composable
+private fun OrderProgressSection(
+    orders: List<OrderProgress>,
+    state: WorkspaceLoadState,
+    error: String?,
+    unavailable: Boolean,
+    onRefresh: () -> Unit,
+) {
+    VSpace(Spacing.lg)
+    Text("订单进度", fontSize = 16.sp, fontWeight = FontWeight.Bold, color = LogisticsTheme.colors.textPrimary)
+    VSpace(4.dp)
+    Text(
+        "按订单维度统计（服务端 /workshop/order-progress）；仅显示本人授权车间的订单",
+        fontSize = 11.sp,
+        color = LogisticsTheme.colors.textTertiary,
+    )
+    VSpace(Spacing.sm)
+    when (state) {
+        WorkspaceLoadState.LOADING -> LoadingRow("正在加载订单进度…")
+        WorkspaceLoadState.ERROR -> EmptyState(
+            title = if (unavailable) "订单进度接口不可用" else "订单进度加载失败",
+            description = error ?: "未能读取服务端订单进度，请检查网络后重试。",
+            action = { PrimaryButton(text = "重试", onClick = onRefresh) },
+        )
+        WorkspaceLoadState.EMPTY -> EmptyState(
+            title = "暂无可显示的订单",
+            description = "服务端没有返回授权范围内的订单进度；这不代表进度为 0%。",
+            action = { SecondaryButton(text = "刷新订单进度", onClick = onRefresh) },
+        )
+        WorkspaceLoadState.IDLE -> EmptyState(
+            title = "等待订单进度",
+            description = "刷新后从服务端读取订单维度进度。",
+            action = { PrimaryButton(text = "加载订单进度", onClick = onRefresh) },
+        )
+        WorkspaceLoadState.CONTENT -> orders.forEach { OrderProgressCard(it) }
+    }
+}
+
+@Composable
+private fun OrderProgressCard(order: OrderProgress) {
+    AppCard(accentColor = LogisticsTheme.colors.success) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "订单 ${order.orderNo.ifBlank { "—" }}",
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = LogisticsTheme.colors.textPrimary,
+                )
+                VSpace(4.dp)
+                Text(
+                    "机台任务 ${order.totalTasks} 台 · 已完工 ${order.completedTasks} · 进行中 ${order.inProgressTasks} · 待料 ${order.waitingMaterialTasks}",
+                    fontSize = 11.sp,
+                    color = LogisticsTheme.colors.textTertiary,
+                )
+            }
+            // 服务端未返回进度时显示「—」：不能显示 0% 让主管误判
+            Text(
+                order.displayProgressPercent,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold,
+                color = LogisticsTheme.colors.success,
+            )
+        }
     }
 }
 

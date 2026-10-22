@@ -8,6 +8,7 @@ import com.company.logistics.data.remote.MaterialFlowApi
 import com.company.logistics.model.AssemblyTaskPage
 import com.company.logistics.model.Inventory
 import com.company.logistics.model.MachineProgressPage
+import com.company.logistics.model.OrderProgressPage
 import com.company.logistics.model.WorkshopProgressSummary
 import com.company.logistics.model.LocationStock
 import com.company.logistics.model.Material
@@ -219,6 +220,9 @@ class LogisticsViewModelMaterialBatchTest {
             Result.failure(RuntimeException("offline"))
 
         override suspend fun workshopMachineProgress(page: Int, pageSize: Int): Result<MachineProgressPage> =
+            Result.failure(RuntimeException("offline"))
+
+        override suspend fun workshopOrderProgress(page: Int, pageSize: Int): Result<OrderProgressPage> =
             Result.failure(RuntimeException("offline"))
 
         override suspend fun materialInventory(code: String): Result<MaterialInventory> =

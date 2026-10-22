@@ -36,6 +36,8 @@ import com.company.logistics.model.HandoverTimelineEvent
 import com.company.logistics.model.WorkshopProgressSummary
 import com.company.logistics.model.MachineProgress
 import com.company.logistics.model.MachineProgressPage
+import com.company.logistics.model.OrderProgress
+import com.company.logistics.model.OrderProgressPage
 import com.company.logistics.model.AssemblyTaskPage
 import com.company.logistics.model.AssemblyTask
 import com.company.logistics.model.AssemblyTaskStatus
@@ -178,6 +180,12 @@ object ApiParser {
             )
         } ?: OrderDetailMaterialSummary()
         val timeline = root.optJSONArray("timeline")?.let { arr -> buildList { for (i in 0 until arr.length()) { val e = arr.getJSONObject(i); add(OrderDetailTimelineEvent(e.optString("type"), e.optString("entityId"), nullableString(e, "status"), nullableString(e, "serverTime"), nullableString(e, "actorId"), nullableString(e, "actorName"))) } } }.orEmpty()
+        // 订单详情自带订单维度进度（progress.orderProgressPercent）；缺失时保持 null，不伪造 0%。
+        val orderProgress = root.optJSONObject("progress")?.let { progress ->
+            parseOrderProgress(progress).let { parsed ->
+                if (parsed.orderNo.isNotBlank()) parsed else parsed.copy(orderNo = root.optString("orderNo").orEmpty())
+            }
+        }
         return OrderDetail(
             orderId = root.optString("orderId"), orderNo = root.optString("orderNo"), productName = nullableString(root, "productName"), orderStatus = nullableString(root, "orderStatus"),
             materials = materials, assemblyTasks = tasks,
@@ -188,6 +196,7 @@ object ApiParser {
             materialsPage = root.optInt("materialsPage", 1),
             materialsPageSize = root.optInt("materialsPageSize", 0),
             materialsHasMore = root.optBoolean("materialsHasMore", false),
+            orderProgress = orderProgress,
         )
     }
 
@@ -926,6 +935,40 @@ object ApiParser {
         )
     }
 
+    /**
+     * 解析 `/workshop/order-progress`（订单维度进度）。
+     *
+     * 容错：items 缺失/为 null 返回空列表；单个元素为 null 跳过；
+     * orderProgressPercent 缺失或为 null 保留 null（UI 显示「—」，不冒充 0%）。
+     */
+    fun parseOrderProgressPage(json: String): OrderProgressPage {
+        val root = JSONObject(json)
+        val array = root.optJSONArray("items") ?: JSONArray()
+        return OrderProgressPage(
+            items = buildList {
+                for (i in 0 until array.length()) {
+                    val item = array.optJSONObject(i) ?: continue
+                    add(parseOrderProgress(item))
+                }
+            },
+            page = root.optInt("page", 1),
+            pageSize = root.optInt("pageSize", 50),
+            workshop = nullableStringAny(root, "workshop", "workshopId", "workshop_id"),
+            scope = nullableString(root, "scope"),
+            serverTime = nullableStringAny(root, "serverTime", "server_time"),
+        )
+    }
+
+    /** 订单进度对象解析（也用于订单详情 `progress` 段）。字段名对齐后端契约。 */
+    private fun parseOrderProgress(o: JSONObject): OrderProgress = OrderProgress(
+        orderNo = o.optString("orderNo", o.optString("order_no")).orEmpty(),
+        orderProgressPercent = nullableIntAny(o, "orderProgressPercent", "order_progress_percent"),
+        totalTasks = o.optInt("totalTasks", o.optInt("total_tasks")),
+        completedTasks = o.optInt("completedTasks", o.optInt("completed_tasks")),
+        waitingMaterialTasks = o.optInt("waitingMaterialTasks", o.optInt("waiting_tasks")),
+        inProgressTasks = o.optInt("inProgressTasks", o.optInt("in_progress_tasks")),
+    )
+
     fun parseMachineProgressPage(json: String): MachineProgressPage {
         val root = JSONObject(json)
         val array = root.optJSONArray("items") ?: JSONArray()
@@ -1049,6 +1092,8 @@ class ApiException(
  * Tokens, request headers, and backend stack traces must never reach UI or local queue text.
  */
 fun ApiException.safeMessage(fallback: String): String = when {
+    // 明文 HTTP 被系统拦截：必须原样给出「正式版要求 HTTPS」的处置建议，不能降级成通用兜底文案。
+    code == "CLEARTEXT_BLOCKED" -> message
     isUnauthorized -> "登录已失效，请重新登录"
     isForbidden -> "当前账号无权完成该操作"
     isConflict -> "数据状态已变化，请刷新后重试"

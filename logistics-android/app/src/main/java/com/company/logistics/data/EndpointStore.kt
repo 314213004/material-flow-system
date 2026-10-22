@@ -45,7 +45,9 @@ class EndpointStore private constructor(
     fun save(rawUrl: String): Result<String> {
         val normalized = normalize(rawUrl)
             ?: return Result.failure(IllegalArgumentException(ERR_INVALID))
-        if (!BuildConfig.DEBUG && normalized.startsWith("http://", ignoreCase = true) && !isIntranetHttp(normalized)) {
+        // 0.5.51：正式包的 network_security_config 已禁止全局明文（仅 debug 覆盖为允许），
+        // 保存明文地址必然在连接时被系统拦截 —— 在这里就失败并给出可执行的提示。
+        if (!BuildConfig.DEBUG && normalized.startsWith("http://", ignoreCase = true)) {
             return Result.failure(IllegalArgumentException(ERR_RELEASE_HTTP))
         }
         prefs.edit().putString(KEY_URL, normalized).apply()
@@ -80,7 +82,7 @@ class EndpointStore private constructor(
 
         const val ERR_INVALID = "地址格式不正确，请填写形如 http://192.168.1.10:8000 的完整地址"
         const val ERR_SCHEME = "只支持 http:// 或 https:// 开头的地址"
-        const val ERR_RELEASE_HTTP = "正式版只支持 HTTPS 地址，请改用 https://"
+        const val ERR_RELEASE_HTTP = "正式版要求 HTTPS：明文 HTTP 已被禁用，请联系管理员获取 https:// 地址"
 
         @Volatile
         private var instance: EndpointStore? = null

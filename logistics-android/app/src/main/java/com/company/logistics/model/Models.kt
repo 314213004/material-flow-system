@@ -452,7 +452,7 @@ enum class WorkspaceMetricKey(val label: String, val description: String) {
     TOTAL_LABOR_MINUTES("总工时（分钟）", "服务端汇总的装配与临时调拨工时"),
     ASSEMBLY_LABOR_MINUTES("装配工时（分钟）", "服务端汇总的装配工时"),
     TEMPORARY_TRANSFER_LABOR_MINUTES("临时调拨工时（分钟）", "服务端独立临时调拨工时"),
-    OVERALL_PROGRESS_PERCENT("订单总进度", "服务端完成任务比例")
+    OVERALL_PROGRESS_PERCENT("整体进度", "服务端完成任务比例（车间/全厂范围，不是单个订单）")
 }
 
 /**

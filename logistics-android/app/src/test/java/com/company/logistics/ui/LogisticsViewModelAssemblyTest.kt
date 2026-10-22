@@ -19,6 +19,9 @@ import com.company.logistics.model.LaborSummaryItem
 import com.company.logistics.model.LaborSummaryPage
 import com.company.logistics.model.MachineProgress
 import com.company.logistics.model.MachineProgressPage
+import com.company.logistics.model.OrderProgress
+import com.company.logistics.model.OrderProgressPage
+import com.company.logistics.model.displayProgressPercent
 import com.company.logistics.model.User
 import com.company.logistics.model.UserRole
 import com.company.logistics.model.WorkshopProgressSummary
@@ -32,6 +35,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.emptyFlow
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -188,6 +192,72 @@ class LogisticsViewModelAssemblyTest {
         assertEquals(1, repository.workshopSummaryCalls)
         assertEquals(1, repository.workshopMachineCalls)
         scope.cancel()
+    }
+
+    @Test
+    fun supervisorBoardShowsOrderDimensionProgressNotWorkshopOverallValue() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val repository = FakeAssemblyRepository(UserRole.WORKSHOP_SUPERVISOR)
+        val viewModel = LogisticsViewModel(repository, scope)
+
+        viewModel.login("supervisor", "password", "device", remember = false)
+        val state = viewModel.state.value
+
+        // 车间/全厂值（summary.overallProgressPercent = 80）仍在，但只作为「车间整体进度」
+        assertEquals(80, state.workshopProgressSummary?.overallProgressPercent)
+        // 「订单进度」用 /workshop/order-progress 的订单维度值
+        assertEquals(listOf("WO-A", "WO-B"), state.workshopOrderProgress.map { it.orderNo })
+        assertEquals(listOf(45, 100), state.workshopOrderProgress.map { it.orderProgressPercent })
+        assertEquals("45%", state.workshopOrderProgress.first().displayProgressPercent)
+        assertEquals(WorkspaceLoadState.CONTENT, state.workshopOrderState)
+        assertEquals(1, repository.workshopOrderCalls)
+        // 逐条断言：没有任何一行是拿整体值 80 冒充的
+        assertTrue(state.workshopOrderProgress.none { it.orderProgressPercent == 80 })
+        scope.cancel()
+    }
+
+    @Test
+    fun supervisorOrderProgressEmptyResponseBecomesEmptyStateNotZeroPercent() {
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val repository = FakeAssemblyRepository(UserRole.WORKSHOP_SUPERVISOR)
+        repository.orderProgressResult = Result.success(OrderProgressPage(items = emptyList(), page = 1, pageSize = 50))
+        val viewModel = LogisticsViewModel(repository, scope)
+
+        viewModel.login("supervisor", "password", "device", remember = false)
+        val state = viewModel.state.value
+
+        assertTrue(state.workshopOrderProgress.isEmpty())
+        assertEquals(WorkspaceLoadState.EMPTY, state.workshopOrderState)
+        assertNull(state.workshopOrderError)
+        scope.cancel()
+    }
+
+    @Test
+    fun supervisorOrderProgressForbiddenAndNetworkFailuresShowReadableChineseText() {
+        val forbiddenScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val forbiddenRepo = FakeAssemblyRepository(UserRole.WORKSHOP_SUPERVISOR)
+        forbiddenRepo.orderProgressResult = Result.failure(ApiException(403, "FORBIDDEN", "forbidden"))
+        val forbiddenModel = LogisticsViewModel(forbiddenRepo, forbiddenScope)
+
+        forbiddenModel.login("supervisor", "password", "device", remember = false)
+        val forbidden = forbiddenModel.state.value
+        assertEquals(WorkspaceLoadState.ERROR, forbidden.workshopOrderState)
+        assertTrue(forbidden.workshopOrderError!!.contains("无权查看这些车间的订单进度"))
+        assertTrue(forbidden.workshopOrderProgress.isEmpty())
+        // 订单进度失败不拖累工时/机台区
+        assertEquals(WorkspaceLoadState.CONTENT, forbidden.workshopMachineState)
+        forbiddenScope.cancel()
+
+        val networkScope = CoroutineScope(SupervisorJob() + Dispatchers.Unconfined)
+        val networkRepo = FakeAssemblyRepository(UserRole.WORKSHOP_SUPERVISOR)
+        networkRepo.orderProgressResult = Result.failure(RuntimeException("offline"))
+        val networkModel = LogisticsViewModel(networkRepo, networkScope)
+
+        networkModel.login("supervisor", "password", "device", remember = false)
+        val network = networkModel.state.value
+        assertEquals(WorkspaceLoadState.ERROR, network.workshopOrderState)
+        assertTrue(network.workshopOrderError!!.contains("网络不可用"))
+        networkScope.cancel()
     }
 
     @Test
@@ -481,6 +551,28 @@ class LogisticsViewModelAssemblyTest {
                     items = listOf(MachineProgress("machine-1", "M-01", 5, 4, 80, 50)),
                     page = page,
                     pageSize = pageSize,
+                )
+            )
+        }
+
+        /** 订单维度进度：默认两单（45% / 100%），故意与 summary 的 80% 不同，用于验证口径。 */
+        var orderProgressResult: Result<OrderProgressPage>? = null
+        var workshopOrderCalls = 0
+
+        override suspend fun workshopOrderProgress(page: Int, pageSize: Int): Result<OrderProgressPage> {
+            workshopOrderCalls++
+            orderProgressResult?.let { return it }
+            return Result.success(
+                OrderProgressPage(
+                    items = listOf(
+                        OrderProgress("WO-A", 45, totalTasks = 4, completedTasks = 1, waitingMaterialTasks = 1, inProgressTasks = 2),
+                        OrderProgress("WO-B", 100, totalTasks = 2, completedTasks = 2),
+                    ),
+                    page = page,
+                    pageSize = pageSize,
+                    workshop = "workshop-1",
+                    scope = "WORKSHOP",
+                    serverTime = "server-time",
                 )
             )
         }

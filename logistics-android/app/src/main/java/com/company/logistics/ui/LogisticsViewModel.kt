@@ -25,6 +25,7 @@ import com.company.logistics.model.MaterialBatchLine
 import com.company.logistics.model.MachineProgress
 import com.company.logistics.model.OfflineOperation
 import com.company.logistics.model.OrderMaterialItem
+import com.company.logistics.model.OrderProgress
 import com.company.logistics.model.OrderMaterialStatus
 import com.company.logistics.model.OrderDetail
 import com.company.logistics.model.RoleWorkspaceSummary
@@ -230,6 +231,14 @@ data class LogisticsUiState(
     val workshopMachinePage: Int = 1,
     val workshopMachinePageSize: Int = WORKSPACE_PAGE_SIZE,
     val workshopMachineHasNext: Boolean = false,
+    /** 订单维度进度（`/workshop/order-progress`）：一订单一条，主管看板「订单进度」唯一数据源 */
+    val workshopOrderProgress: List<OrderProgress> = emptyList(),
+    val workshopOrderState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
+    val workshopOrderError: String? = null,
+    val workshopOrderUnavailable: Boolean = false,
+    val workshopOrderPage: Int = 1,
+    val workshopOrderPageSize: Int = ORDER_PROGRESS_PAGE_SIZE,
+    val workshopOrderHasNext: Boolean = false,
     val workspaceTimelineItemId: String? = null,
     val workspaceTimeline: HandoverTimeline? = null,
     val workspaceTimelineState: WorkspaceLoadState = WorkspaceLoadState.IDLE,
@@ -335,11 +344,14 @@ data class LogisticsUiState(
 
     val workshopLoading: Boolean
         get() = workshopSummaryState == WorkspaceLoadState.LOADING ||
-            workshopMachineState == WorkspaceLoadState.LOADING
+            workshopMachineState == WorkspaceLoadState.LOADING ||
+            workshopOrderState == WorkspaceLoadState.LOADING
 
     companion object {
         const val WORKSPACE_PAGE_SIZE = 20
         const val AUDIT_PAGE_SIZE = 50
+        /** 订单进度分页：后端默认 50、上限 200，这里对齐默认值 */
+        const val ORDER_PROGRESS_PAGE_SIZE = 50
     }
 }
 
@@ -708,6 +720,12 @@ class LogisticsViewModel(
                     workshopMachineUnavailable = false,
                     workshopMachinePage = 1,
                     workshopMachineHasNext = false,
+                    workshopOrderProgress = emptyList(),
+                    workshopOrderState = WorkspaceLoadState.IDLE,
+                    workshopOrderError = null,
+                    workshopOrderUnavailable = false,
+                    workshopOrderPage = 1,
+                    workshopOrderHasNext = false,
                     message = "已切换到${role.label}测试视图",
                     error = null,
                 )
@@ -767,6 +785,12 @@ class LogisticsViewModel(
                     workshopMachineUnavailable = false,
                     workshopMachinePage = 1,
                     workshopMachineHasNext = false,
+                    workshopOrderProgress = emptyList(),
+                    workshopOrderState = WorkspaceLoadState.IDLE,
+                    workshopOrderError = null,
+                    workshopOrderUnavailable = false,
+                    workshopOrderPage = 1,
+                    workshopOrderHasNext = false,
                     message = "已恢复管理员工作台",
                     error = null,
                 )
@@ -1108,6 +1132,10 @@ class LogisticsViewModel(
                     workshopMachinePage = requestedPage,
                     workshopMachinePageSize = LogisticsUiState.WORKSPACE_PAGE_SIZE,
                     workshopMachineProgress = if (resetToFirstPage) emptyList() else it.workshopMachineProgress,
+                    workshopOrderState = WorkspaceLoadState.LOADING,
+                    workshopOrderError = null,
+                    workshopOrderUnavailable = false,
+                    workshopOrderProgress = if (resetToFirstPage) emptyList() else it.workshopOrderProgress,
                 )
             }
 
@@ -1116,6 +1144,10 @@ class LogisticsViewModel(
                 val machines = async {
                     repo.workshopMachineProgress(requestedPage, LogisticsUiState.WORKSPACE_PAGE_SIZE)
                 }
+                // 订单维度进度：订单页固定取第一页（订单数远小于机台数），与机台分页互不影响。
+                val orders = if (resetToFirstPage) {
+                    async { repo.workshopOrderProgress(1, LogisticsUiState.ORDER_PROGRESS_PAGE_SIZE) }
+                } else null
 
                 summary?.await()
                     ?.onSuccess { result ->
@@ -1174,6 +1206,38 @@ class LogisticsViewModel(
                             )
                         }
                     }
+
+                // 订单进度失败不拖累工时/机台区：各自状态独立，UI 各自给中文提示。
+                orders?.await()
+                    ?.onSuccess { result ->
+                        if (!isWorkspaceLoadActive(currentSession, generation, loadContext)) return@onSuccess
+                        _state.update {
+                            it.copy(
+                                workshopOrderProgress = result.items,
+                                workshopOrderState = if (result.items.isEmpty()) WorkspaceLoadState.EMPTY else WorkspaceLoadState.CONTENT,
+                                workshopOrderError = null,
+                                workshopOrderUnavailable = false,
+                                workshopOrderPage = result.page,
+                                workshopOrderPageSize = result.pageSize,
+                                workshopOrderHasNext = result.items.size >= result.pageSize,
+                            )
+                        }
+                    }
+                    ?.onFailure { error ->
+                        if (!isWorkspaceLoadActive(currentSession, generation, loadContext)) return@onFailure
+                        if (error is ApiException && error.isUnauthorized) {
+                            expireSession()
+                            return@onFailure
+                        }
+                        _state.update {
+                            it.copy(
+                                workshopOrderProgress = emptyList(),
+                                workshopOrderState = WorkspaceLoadState.ERROR,
+                                workshopOrderError = orderProgressErrorMessage(error),
+                                workshopOrderUnavailable = isWorkspaceUnavailable(error),
+                            )
+                        }
+                    }
             }
         }
     }
@@ -1203,6 +1267,21 @@ class LogisticsViewModel(
             else -> error.safeMessage("车间统计加载失败，请稍后重试")
         }
         else -> "网络不可用，请检查连接后重试"
+    }
+
+    /**
+     * 订单进度错误文案。
+     *
+     * 401/403/网络失败都要说人话：不能用「0%」或空进度条冒充真实进度（主管会误判交付风险）。
+     */
+    private fun orderProgressErrorMessage(error: Throwable): String = when {
+        isWorkspaceUnavailable(error) -> "服务端未提供订单进度接口，当前无法显示订单进度"
+        error is ApiException -> when {
+            error.isUnauthorized -> "登录已失效，请重新登录后查看订单进度"
+            error.isForbidden -> "当前账号无权查看这些车间的订单进度，请联系管理员授权"
+            else -> error.safeMessage("订单进度加载失败，请稍后重试")
+        }
+        else -> "网络不可用，未能读取订单进度，请检查连接后重试"
     }
 
     private fun currentWorkspaceContext(): WorkspaceQueryContext {
