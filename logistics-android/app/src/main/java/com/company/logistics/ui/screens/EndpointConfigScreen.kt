@@ -217,8 +217,7 @@ fun EndpointConfigScreen(
                 val normalized = EndpointStore.normalize(input)
                 when {
                     normalized == null -> errorText = EndpointStore.ERR_INVALID
-                    // 正式包禁止一切明文（network_security_config base-config = false）
-                    !BuildConfig.DEBUG && normalized.startsWith("http://", ignoreCase = true) ->
+                    !BuildConfig.DEBUG && normalized.startsWith("http://", ignoreCase = true) && !EndpointStore.isIntranetHttp(normalized) ->
                         errorText = EndpointStore.ERR_RELEASE_HTTP
                     normalized == store.effectiveUrl -> {
                         errorText = null
@@ -418,13 +417,13 @@ private object EndpointTester {
             } catch (e: javax.net.ssl.SSLException) {
                 TestResult(false, "TLS 握手失败 · 请检查 HTTPS 证书或配置受信任的证书链")
             } catch (e: java.io.IOException) {
-                // 正式包 base-config 禁止明文：OkHttp/HttpURLConnection 都会抛 CLEARTEXT 相关 IOException。
-                // 原文交给现场没人看得懂，这里统一换成可执行的处置建议。
-                val explained = com.company.logistics.data.remote.CleartextTrafficGuard.describe(e.message)
-                if (explained != null) {
-                    TestResult(false, explained)
+                // 明文策略已放开，理论上不会被系统拦截；
+                // 保留该分支以防后续收窄为白名单时静默失败。
+                val msg = e.message.orEmpty()
+                if (msg.contains("Cleartext", ignoreCase = true)) {
+                    TestResult(false, "明文流量被系统拦截 · 当前构建的明文策略为关闭状态")
                 } else {
-                    TestResult(false, "网络异常：${e.message.orEmpty()}")
+                    TestResult(false, "网络异常：$msg")
                 }
             } catch (e: Exception) {
                 TestResult(false, "未知错误：${e.javaClass.simpleName} ${e.message.orEmpty()}")

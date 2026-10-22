@@ -1092,8 +1092,6 @@ class ApiException(
  * Tokens, request headers, and backend stack traces must never reach UI or local queue text.
  */
 fun ApiException.safeMessage(fallback: String): String = when {
-    // 明文 HTTP 被系统拦截：必须原样给出「正式版要求 HTTPS」的处置建议，不能降级成通用兜底文案。
-    code == "CLEARTEXT_BLOCKED" -> message
     isUnauthorized -> "登录已失效，请重新登录"
     isForbidden -> "当前账号无权完成该操作"
     isConflict -> "数据状态已变化，请刷新后重试"

@@ -1159,17 +1159,10 @@ open class MaterialFlowApi(
     /**
      * 同步执行一次 HTTP 调用，返回（状态码，响应体文本）。
      * ResponseBody.string() 读完即关闭；外层 use 确保连接可被连接池复用。
-     *
-     * 正式包 `network_security_config` 的 base-config 禁止明文，连接 http:// 时
-     * OkHttp 会在 execute() 抛 IOException；这里换成用户能照着做的提示。
      */
     private fun executeOnce(httpRequest: Request): Pair<Int, String> =
-        try {
-            httpClient.newCall(httpRequest).execute().use { response ->
-                response.code to (response.body?.string() ?: "")
-            }
-        } catch (io: java.io.IOException) {
-            CleartextTrafficGuard.rethrow(io)
+        httpClient.newCall(httpRequest).execute().use { response ->
+            response.code to (response.body?.string() ?: "")
         }
 
     private suspend fun request(
@@ -1274,40 +1267,9 @@ object ApiConfig {
     /**
      * 构建期注入的 API 根地址。占位值不含真实端点，
      * 详见 docs/部署配置说明。
-     * 注意：正式包（main）的 network_security_config 已禁止明文，
-     * 明文地址只能在 debug/验收包使用（见 src/debug/res/xml/network_security_config.xml）。
+     * TODO(部署): 由 CI 注入 HTTPS 正式域名，并移除明文流量许可（AndroidManifest）。
      */
     var baseUrl: String = BuildConfig.API_BASE_URL
     var connectTimeoutMs: Int = 10_000
     var readTimeoutMs: Int = 15_000
-}
-
-/**
- * 明文 HTTP 被系统网络安全策略拦截时的可读提示。
- *
- * 背景：release 的 `base-config cleartextTrafficPermitted="false"`（仅 debug 覆盖为 true）。
- * OkHttp 在 execute() 抛 `UnknownServiceException: CLEARTEXT communication to <host> not permitted
- * by network security policy`，交给 UI 只会变成一句 IOException —— 现场不知道该找谁。
- */
-internal object CleartextTrafficGuard {
-    const val CODE = "CLEARTEXT_BLOCKED"
-    const val MESSAGE = "正式版要求 HTTPS：当前地址是明文 HTTP，已被系统拦截。请联系管理员获取 https:// 地址。"
-
-    /** 判断是否为 Android 明文流量拦截（OkHttp 在不同版本里用 "not permitted" / "blocked"）。 */
-    fun isBlocked(message: String?): Boolean {
-        val text = message?.lowercase() ?: return false
-        if (!text.contains("cleartext")) return false
-        return text.contains("not permitted") || text.contains("blocked") || text.contains("network security policy")
-    }
-
-    /** 命中明文拦截 → 抛可读的 [ApiException]；其余 IOException 原样抛出（保留原有网络错误语义）。 */
-    fun rethrow(io: java.io.IOException): Nothing {
-        if (isBlocked(io.message)) {
-            throw ApiException(statusCode = 0, code = CODE, message = MESSAGE, retryable = false)
-        }
-        throw io
-    }
-
-    /** 设置页「测试连通性」等直连场景的文案映射：命中时返回提示，否则返回 null。 */
-    fun describe(message: String?): String? = if (isBlocked(message)) MESSAGE else null
 }
